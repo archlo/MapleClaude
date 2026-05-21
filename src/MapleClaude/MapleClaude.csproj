@@ -1,0 +1,183 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <RootNamespace>MapleClaude</RootNamespace>
+    <AssemblyName>MapleClaude</AssemblyName>
+    <ApplicationIcon>$(MSBuildThisFileDirectory)..\..\Icon.ico</ApplicationIcon>
+    <UseAppHost>true</UseAppHost>
+    <!-- net10.0-windows because MonoGame.Framework.WindowsDX 3.8.x only ships
+         a Windows TFM; plain net10.0 silently skips loading the assembly. -->
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <!-- WinForms enabled so the optional debug overlay window
+         (Debug/DebugWindow.cs) can launch when MAPLECLAUDE_DEBUG=1. -->
+    <UseWindowsForms>true</UseWindowsForms>
+    <UseWPF>false</UseWPF>
+  </PropertyGroup>
+
+  <!-- Single-file self-contained publish: produces ONE MapleClaude.exe that can be
+       dragged into a MapleStory folder. Runtime is bundled (no .NET install needed
+       on the target machine). Native deps (MonoGame, SDL2, etc.) are extracted to
+       a temp folder on first launch.
+
+       These props are always set, but most of them only do anything during the
+       Publish target. RuntimeIdentifier is the exception — setting it would force
+       the regular bin/ layout to be RID-specific, breaking dev iteration — so we
+       only apply it when the AutoPublish target (or `dotnet publish -r win-x64`)
+       is running. -->
+  <PropertyGroup>
+    <PublishSingleFile>true</PublishSingleFile>
+    <SelfContained>true</SelfContained>
+    <!-- Native libraries (SDL2.dll, FAudio.dll, etc.) get extracted to a temp
+         folder on first launch. Required for MonoGame to find its native deps. -->
+    <IncludeNativeLibrariesForSelfExtract>true</IncludeNativeLibrariesForSelfExtract>
+    <!-- IncludeAllContentForSelfExtract=true crashes the launcher with
+         STATUS_STACK_BUFFER_OVERRUN (0xc0000409) when combined with the .NET 10
+         single-file bundler + MonoGame on Windows. Leave it false; managed
+         deps stay inside the bundle, only native deps extract. -->
+    <IncludeAllContentForSelfExtract>false</IncludeAllContentForSelfExtract>
+    <!-- Compression similarly destabilizes the launch under the same combo.
+         Without compression the exe is ~120 MB; with the above off, MonoGame
+         launches reliably. We pay the size to get a working drag-and-drop. -->
+    <EnableCompressionInSingleFile>false</EnableCompressionInSingleFile>
+    <!-- Embed debug info into the exe so crash stacks have line numbers. -->
+    <DebugType>embedded</DebugType>
+    <!-- MonoGame uses reflection extensively (content pipeline, type lookup);
+         do NOT enable PublishTrimmed or PublishAot until proven safe. -->
+    <PublishTrimmed>false</PublishTrimmed>
+    <PublishAot>false</PublishAot>
+  </PropertyGroup>
+
+  <!-- RID only kicks in during the nested publish pass; regular `dotnet build`
+       and `dotnet run` get clean RID-less bin/ output. -->
+  <PropertyGroup Condition="'$(IsAutoPublishing)' == 'true'">
+    <RuntimeIdentifier>win-x64</RuntimeIdentifier>
+  </PropertyGroup>
+
+  <!-- ────────────────────────────────────────────────────────────────────────
+       AUTO-PUBLISH AFTER EVERY BUILD
+       ────────────────────────────────────────────────────────────────────────
+       Every `dotnet build`, every F5 in Visual Studio, every `msbuild` invocation
+       produces a single self-contained MapleClaude.exe at:
+
+           <repo>\artifacts\$(Configuration)\MapleClaude.exe
+
+       Drag that file into your MapleStory folder. That's it.
+
+       Reasons we *don't* always do this:
+         - You're running `dotnet test` (set NoAutoPublish=true to skip).
+         - You want fast incremental iteration (use `dotnet run` which skips the
+           publish step, or pass -p:NoAutoPublish=true to dotnet build).
+         - Visual Studio's design-time builds (IntelliSense) — auto-skipped.
+  ──────────────────────────────────────────────────────────────────────── -->
+
+  <PropertyGroup>
+    <AutoPublishOutputDir>$(MSBuildThisFileDirectory)..\..\artifacts\$(Configuration)\</AutoPublishOutputDir>
+  </PropertyGroup>
+
+  <Target Name="AutoPublishSingleFile"
+          AfterTargets="Build"
+          Condition=" '$(IsAutoPublishing)' != 'true' AND '$(NoAutoPublish)' != 'true' AND '$(DesignTimeBuild)' != 'true' AND '$(BuildingProject)' == 'true' ">
+
+    <Message Importance="high" Text="==> Auto-publishing single-file MapleClaude.exe ($(Configuration), win-x64)..." />
+
+    <MSBuild Projects="$(MSBuildProjectFile)"
+             Targets="Publish"
+             Properties="IsAutoPublishing=true;Configuration=$(Configuration);RuntimeIdentifier=win-x64;PublishDir=$(AutoPublishOutputDir)" />
+
+    <Message Importance="high" Text="==> Wrote $(AutoPublishOutputDir)MapleClaude.exe" />
+  </Target>
+
+  <!-- ────────────────────────────────────────────────────────────────────────
+       AUTO-DEPLOY AFTER AUTO-PUBLISH
+       ────────────────────────────────────────────────────────────────────────
+       Drops the freshly published MapleClaude.exe into a user-defined
+       deploy folder (typically their MapleStory v95 folder) on every build.
+
+       Resolution order for the deploy path:
+         1. $(MAPLECLAUDE_DEPLOY_DIR) — environment variable (preferred).
+         2. .deploy.local file at the repo root containing the path (fallback).
+
+       Neither is committed. If neither is set, the deploy step silently
+       skips. Set NoAutoDeploy=true to skip even when one is configured.
+
+       To wire up the env var (PowerShell, persists for the user account):
+         [Environment]::SetEnvironmentVariable('MAPLECLAUDE_DEPLOY_DIR', 'X:\path\to\maplestory', 'User')
+       Then RESTART Visual Studio so it picks up the new env var.
+
+       To wire up the file (no shell restart needed; one-time per machine):
+         echo X:\path\to\maplestory > .deploy.local
+  ──────────────────────────────────────────────────────────────────────── -->
+
+  <PropertyGroup>
+    <_DeployFile>$(MSBuildThisFileDirectory)..\..\.deploy.local</_DeployFile>
+    <_DeployDirFromFile Condition="Exists('$(_DeployFile)')">$([System.IO.File]::ReadAllText('$(_DeployFile)').Trim())</_DeployDirFromFile>
+    <_EffectiveDeployDir Condition="'$(MAPLECLAUDE_DEPLOY_DIR)' != ''">$(MAPLECLAUDE_DEPLOY_DIR)</_EffectiveDeployDir>
+    <_EffectiveDeployDir Condition="'$(_EffectiveDeployDir)' == '' AND '$(_DeployDirFromFile)' != ''">$(_DeployDirFromFile)</_EffectiveDeployDir>
+  </PropertyGroup>
+
+  <Target Name="AutoDeploySingleFile"
+          AfterTargets="AutoPublishSingleFile"
+          Condition=" '$(IsAutoPublishing)' != 'true' AND '$(NoAutoDeploy)' != 'true' AND '$(_EffectiveDeployDir)' != '' ">
+
+    <Message Importance="high" Text="==> Deploying MapleClaude.exe -> $(_EffectiveDeployDir)" />
+
+    <Copy SourceFiles="$(AutoPublishOutputDir)MapleClaude.exe"
+          DestinationFolder="$(_EffectiveDeployDir)"
+          SkipUnchangedFiles="false"
+          ContinueOnError="true">
+      <Output TaskParameter="CopiedFiles" ItemName="_DeployedFiles" />
+    </Copy>
+
+    <Message Importance="high"
+             Text="==> Deploy OK"
+             Condition="'@(_DeployedFiles)' != ''" />
+    <Warning Text="Deploy failed: could not copy MapleClaude.exe to $(_EffectiveDeployDir) (does the path exist and is it writable?)"
+             Condition="'@(_DeployedFiles)' == ''" />
+  </Target>
+
+  <Target Name="AutoDeployHint"
+          AfterTargets="AutoPublishSingleFile"
+          Condition=" '$(IsAutoPublishing)' != 'true' AND '$(NoAutoDeploy)' != 'true' AND '$(_EffectiveDeployDir)' == '' ">
+    <Message Importance="normal"
+             Text="==> Skipping deploy: set MAPLECLAUDE_DEPLOY_DIR env var or create .deploy.local at repo root." />
+  </Target>
+
+  <!-- WinForms + MonoGame share several type names (Color, Button, Rectangle).
+       Alias the MonoGame types as the default `Color` etc.; WinForms code
+       (DebugWindow.cs) must use fully-qualified System.Drawing / System.Windows.Forms
+       names. Also alias our UI.Button so `Button` resolves to ours, not WinForms'. -->
+  <ItemGroup>
+    <Using Include="Microsoft.Xna.Framework.Color" Alias="Color" />
+    <Using Include="Microsoft.Xna.Framework.Rectangle" Alias="Rectangle" />
+    <Using Include="Microsoft.Xna.Framework.Input.Keys" Alias="Keys" />
+    <Using Include="Microsoft.Xna.Framework.Input.ButtonState" Alias="ButtonState" />
+    <Using Include="MapleClaude.UI.Button" Alias="Button" />
+  </ItemGroup>
+
+  <!-- Window/taskbar icon source. Loaded at runtime from this embedded resource
+       (see MapleClaudeGame.TrySetWindowIcon). The repo-root Icon.ico still wires
+       the .exe file icon via <ApplicationIcon> above. -->
+  <ItemGroup>
+    <EmbeddedResource Include="$(MSBuildThisFileDirectory)..\..\Icon.png" LogicalName="MapleClaude.Icon.png" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="MonoGame.Framework.WindowsDX" />
+    <PackageReference Include="Microsoft.Extensions.Hosting" />
+    <PackageReference Include="Microsoft.Extensions.Configuration.EnvironmentVariables" />
+    <PackageReference Include="Serilog" />
+    <PackageReference Include="Serilog.Extensions.Hosting" />
+    <PackageReference Include="Serilog.Sinks.Console" />
+    <PackageReference Include="Serilog.Sinks.File" />
+    <PackageReference Include="Serilog.Sinks.Debug" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\MapleClaude.Domain\MapleClaude.Domain.csproj" />
+    <ProjectReference Include="..\MapleClaude.Net\MapleClaude.Net.csproj" />
+    <ProjectReference Include="..\MapleClaude.Wz\MapleClaude.Wz.csproj" />
+    <ProjectReference Include="..\MapleClaude.Render\MapleClaude.Render.csproj" />
+  </ItemGroup>
+
+</Project>

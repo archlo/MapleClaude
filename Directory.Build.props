@@ -1,0 +1,52 @@
+<Project>
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <LangVersion>13</LangVersion>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+    <EnableNETAnalyzers>true</EnableNETAnalyzers>
+    <AnalysisLevel>latest</AnalysisLevel>
+    <AnalysisMode>Default</AnalysisMode>
+    <EnforceCodeStyleInBuild>true</EnforceCodeStyleInBuild>
+    <!-- Globally suppress noisy rules that don't pull their weight in a game client:
+         CA1305 — IFormatProvider plumbing through every Serilog call
+         CA1848 — LoggerMessage source-gen overkill for a 2D client
+         CA1873 — "may be expensive" hot-path noise on logging
+         CA2007 — ConfigureAwait(false) is unnecessary in our single-threaded game loop -->
+    <NoWarn>$(NoWarn);CS1591;CA1305;CA1848;CA1873;CA2007</NoWarn>
+
+    <!-- Build "platform" is Any CPU (the standard .NET pattern Visual Studio expects).
+         The actual CPU target is x64 via PlatformTarget. RuntimeIdentifier wins x64
+         for native deps (MonoGame.Framework.WindowsDX). -->
+    <PlatformTarget>x64</PlatformTarget>
+    <RuntimeIdentifiers>win-x64</RuntimeIdentifiers>
+
+    <ManagePackageVersionsCentrally>true</ManagePackageVersionsCentrally>
+    <CentralPackageTransitivePinningEnabled>true</CentralPackageTransitivePinningEnabled>
+
+    <!-- GenerateDocumentationFile required for IDE0005 (unused-using) enforcement. -->
+    <GenerateDocumentationFile>true</GenerateDocumentationFile>
+
+    <Company>MapleClaude</Company>
+    <Authors>MapleClaude contributors</Authors>
+    <Product>MapleClaude</Product>
+    <Copyright>Copyright (c) MapleClaude contributors</Copyright>
+    <RepositoryUrl>https://github.com/MujyKun/MapleClaude</RepositoryUrl>
+    <RepositoryType>git</RepositoryType>
+  </PropertyGroup>
+
+  <PropertyGroup Condition="'$(Configuration)' == 'Debug'">
+    <DefineConstants>$(DefineConstants);DEBUG;TRACE</DefineConstants>
+    <DebugType>portable</DebugType>
+    <Optimize>false</Optimize>
+  </PropertyGroup>
+
+  <PropertyGroup Condition="'$(Configuration)' == 'Release'">
+    <DefineConstants>$(DefineConstants);TRACE</DefineConstants>
+    <DebugType>portable</DebugType>
+    <Optimize>true</Optimize>
+  </PropertyGroup>
+
+</Project>

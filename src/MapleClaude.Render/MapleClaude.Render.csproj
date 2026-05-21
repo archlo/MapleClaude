@@ -1,0 +1,27 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <RootNamespace>MapleClaude.Render</RootNamespace>
+    <AssemblyName>MapleClaude.Render</AssemblyName>
+    <!-- net10.0-windows because MonoGame.Framework.WindowsDX 3.8.x only ships
+         a Windows TFM; plain net10.0 silently skips loading the assembly. -->
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <UseWindowsForms>false</UseWindowsForms>
+    <UseWPF>false</UseWPF>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="MonoGame.Framework.WindowsDX" />
+    <PackageReference Include="Microsoft.Extensions.Logging.Abstractions" />
+    <!-- NAudio gives us a pure-managed MP3 → PCM decoder so we can wrap
+         WZ sounds (MP3-encoded) as MonoGame SoundEffects for concurrent
+         SFX playback (BGM still goes through MediaPlayer). -->
+    <PackageReference Include="NAudio" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\MapleClaude.Domain\MapleClaude.Domain.csproj" />
+    <ProjectReference Include="..\MapleClaude.Wz\MapleClaude.Wz.csproj" />
+  </ItemGroup>
+
+</Project>

@@ -1,0 +1,215 @@
+## ──────────────────────────────────────────────────────────────────────────
+## MapleClaude — Local-only Claude references (NEVER commit)
+## ──────────────────────────────────────────────────────────────────────────
+CLAUDE.local.md
+.claude/local-refs.md
+.claude/settings.local.json
+
+# Per-machine deploy target for auto-deploy after build
+.deploy.local
+
+## ──────────────────────────────────────────────────────────────────────────
+## .NET build output
+## ──────────────────────────────────────────────────────────────────────────
+[Bb]in/
+[Oo]bj/
+[Oo]ut/
+[Ll]og/
+[Ll]ogs/
+[Dd]ebug/
+[Dd]ebugPublic/
+[Rr]elease/
+[Rr]eleases/
+x64/
+x86/
+[Ww][Ii][Nn]32/
+[Aa][Rr][Mm]/
+[Aa][Rr][Mm]64/
+bld/
+[Ll]ibrary/
+[Tt]emp/
+[Tt]mp/
+artifacts/
+publish/
+publish_output/
+PublishProfiles/
+!artifacts/.gitkeep
+
+## ──────────────────────────────────────────────────────────────────────────
+## Compiled / generated binaries
+## ──────────────────────────────────────────────────────────────────────────
+*.dll
+*.exe
+*.pdb
+*.so
+*.dylib
+*.lib
+*.a
+*.exp
+*.ilk
+*.meta
+*.obj
+*.iobj
+*.ipdb
+*.tlog
+*.ncb
+*.opensdf
+*.sdf
+*.cachefile
+*.VC.db
+*.VC.VC.opendb
+*.opendb
+
+## ──────────────────────────────────────────────────────────────────────────
+## Visual Studio
+## ──────────────────────────────────────────────────────────────────────────
+.vs/
+*.suo
+*.user
+*.userosscache
+*.userprefs
+*.sln.docstates
+*.psess
+*.vsp
+*.vspx
+*.sap
+*.gpState
+*.aps
+*.ncrunch*
+*.dotCover
+.vshistory/
+*.svclog
+
+## ──────────────────────────────────────────────────────────────────────────
+## JetBrains Rider / ReSharper
+## ──────────────────────────────────────────────────────────────────────────
+.idea/
+_ReSharper*/
+*.[Rr]e[Ss]harper
+*.DotSettings.user
+
+## ──────────────────────────────────────────────────────────────────────────
+## VS Code (keep .vscode/ untracked until we intentionally share configs)
+## ──────────────────────────────────────────────────────────────────────────
+.vscode/
+
+## ──────────────────────────────────────────────────────────────────────────
+## NuGet / package manager
+## ──────────────────────────────────────────────────────────────────────────
+project.lock.json
+project.fragment.lock.json
+project.assets.json
+project.nuget.cache
+*.nupkg
+*.snupkg
+*.lock.json
+.dotnet/
+packages/
+!packages/build/
+
+## ──────────────────────────────────────────────────────────────────────────
+## Test results / coverage
+## ──────────────────────────────────────────────────────────────────────────
+[Tt]est[Rr]esult*/
+[Bb]uild[Ll]og.*
+*.trx
+*.coverage
+*.coveragexml
+coverage/
+coverage*.json
+coverage*.xml
+coverage*.info
+*.opencover.xml
+.coverage.*
+
+## ──────────────────────────────────────────────────────────────────────────
+## MonoGame
+## ──────────────────────────────────────────────────────────────────────────
+Content/bin/
+Content/obj/
+*.mgcb.user
+*.xnb
+!Content/**/*.mgcb
+
+## ──────────────────────────────────────────────────────────────────────────
+## ASP.NET / IIS / Azure (defensive, in case we add web tooling later)
+## ──────────────────────────────────────────────────────────────────────────
+*.publishproxy
+*.azurePubxml
+*.pubxml
+*.publishproj
+PublishScripts/
+csx/
+appsettings.Local.json
+appsettings.Development.json
+
+## ──────────────────────────────────────────────────────────────────────────
+## OS noise
+## ──────────────────────────────────────────────────────────────────────────
+Thumbs.db
+ehthumbs.db
+ehthumbs_vista.db
+[Dd]esktop.ini
+.DS_Store
+.AppleDouble
+.LSOverride
+$RECYCLE.BIN/
+
+## ──────────────────────────────────────────────────────────────────────────
+## Logs / crash dumps / profiler output
+## ──────────────────────────────────────────────────────────────────────────
+*.log
+*.dmp
+*.mdmp
+*.heapsnapshot
+*.cpuprofile
+serilog-*.json
+serilog-*.txt
+
+## ──────────────────────────────────────────────────────────────────────────
+## Local environment files
+## ──────────────────────────────────────────────────────────────────────────
+.env
+.env.local
+.env.*.local
+*.local.env
+
+## ──────────────────────────────────────────────────────────────────────────
+## Editor swap / backup
+## ──────────────────────────────────────────────────────────────────────────
+*~
+*.swp
+*.swo
+*.bak
+*.orig
+*.rej
+\#*\#
+
+## ──────────────────────────────────────────────────────────────────────────
+## Tooling / temp
+## ──────────────────────────────────────────────────────────────────────────
+*.tmp
+*.temp
+*.cache
+*.lock
+*.pid
+node_modules/
+.pnp.*
+
+## ──────────────────────────────────────────────────────────────────────────
+## Reference / private assets — never commit
+## (MapleStory client assets are large, copyrighted, and machine-local)
+## ──────────────────────────────────────────────────────────────────────────
+refs/
+/private/
+*.wz
+*.img
+fixtures/private/
+tests/Fixtures/private/
+
+## ──────────────────────────────────────────────────────────────────────────
+## Documentation build output
+## ──────────────────────────────────────────────────────────────────────────
+_site/
+.docfx/
+api/

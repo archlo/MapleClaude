@@ -1,0 +1,16 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/MapleClaude.Domain/MapleClaude.Domain.csproj" />
+    <Project Path="src/MapleClaude.Net/MapleClaude.Net.csproj" />
+    <Project Path="src/MapleClaude.Render/MapleClaude.Render.csproj" />
+    <Project Path="src/MapleClaude.Wz/MapleClaude.Wz.csproj" />
+    <Project Path="src/MapleClaude/MapleClaude.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/MapleClaude.Net.Tests/MapleClaude.Net.Tests.csproj" />
+    <Project Path="tests/MapleClaude.Wz.Tests/MapleClaude.Wz.Tests.csproj" />
+  </Folder>
+  <Folder Name="/tools/">
+    <Project Path="tools/gen-opcodes/gen-opcodes.csproj" />
+  </Folder>
+</Solution>
