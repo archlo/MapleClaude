@@ -37,6 +37,8 @@ public sealed class WorldSelectStage : Stage
     private MapScene? _scene;
     private SubScreen _subScreen = SubScreen.WorldList;
     private bool _channelAssetsLoaded;
+    private int _selectedWorldId;
+    private int _selectedChannelId;
 
     // ---- Camera + scroll ----
     private Vector2 _cameraOffset;
@@ -303,6 +305,7 @@ public sealed class WorldSelectStage : Stage
 
     private void OnWorldClicked(int worldId)
     {
+        _selectedWorldId = worldId;
         _logger.LogInformation("World {WorldId} clicked — opening channel grid", worldId);
         if (_sound?.GetItem("UI.img/BtMouseClick") is WzSound click)
         {
@@ -329,8 +332,16 @@ public sealed class WorldSelectStage : Stage
             var state = i < 5 ? "normal" : "disabled";
             _channelSprites[i] = LoadCanvas($"Login.img/WorldSelect/channel/{i}/{state}");
         }
-        _btGoWorld = MakeButton("Login.img/WorldSelect/BtGoworld",
-            () => _logger.LogInformation("BtGoworld clicked (no-op placeholder — CharSelectStage TBD)"));
+        _btGoWorld = MakeButton("Login.img/WorldSelect/BtGoworld", () =>
+        {
+            _logger.LogInformation("BtGoworld clicked — entering CharSelectStage world={W} ch={C}",
+                _selectedWorldId, _selectedChannelId);
+            Game.StageDirector.Replace(new CharSelectStage(
+                _loggerFactory.CreateLogger<CharSelectStage>(),
+                _loggerFactory, _ui, _map, _sound,
+                _selectedWorldId, _selectedChannelId,
+                _scene?.Camera ?? Vector2.Zero, _cameraOffset));
+        });
         ApplyChannelLayout();
         _logger.LogInformation("ChannelGrid assets loaded");
     }

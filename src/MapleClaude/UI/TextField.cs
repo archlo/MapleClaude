@@ -29,6 +29,8 @@ public sealed class TextField
 
     public string Text => _text.ToString();
 
+    public void Clear() => _text.Clear();
+
     public Rectangle Bounds => new(
         (int)Position.X, (int)Position.Y, Width, Height);
 

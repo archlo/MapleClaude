@@ -26,4 +26,28 @@ public sealed class WzSprite
     {
         batch.Draw(Texture, position - Origin, color ?? Color.White);
     }
+
+    /// <summary>
+    /// Draws with horizontal or vertical flip. The flip is applied around the sprite's
+    /// natural anchor so layered character parts stay aligned when facing left.
+    /// </summary>
+    public void Draw(SpriteBatch batch, Vector2 position, SpriteEffects effects, Color? color = null)
+    {
+        if (effects == SpriteEffects.None)
+        {
+            Draw(batch, position, color);
+            return;
+        }
+        // Draw via the full overload using the origin as the rotation pivot so the
+        // sprite flips around the anchor point rather than its top-left corner.
+        batch.Draw(Texture,
+            position,
+            sourceRectangle: null,
+            color ?? Color.White,
+            rotation: 0f,
+            origin: Origin,
+            scale: Vector2.One,
+            effects,
+            layerDepth: 0f);
+    }
 }

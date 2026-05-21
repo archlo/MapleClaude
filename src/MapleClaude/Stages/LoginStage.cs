@@ -51,6 +51,9 @@ public sealed class LoginStage : Stage
     private TextField? _idField;
     private TextField? _pwField;
 
+    private LoginWaitOverlay? _loginWait;
+    private QuitConfirmOverlay? _quitConfirm;
+
     private readonly List<Button> _allButtons = new();
 
     // Mutable layout state exposed to the debug window for live tuning.
@@ -146,18 +149,18 @@ public sealed class LoginStage : Stage
         _btLogin = MakeButton("BtLogin", loginBtnPos, () =>
         {
             _logger.LogInformation(
-                "Login clicked: id='{Id}' pwLen={PwLen} — UI-only continue to WorldSelectStage",
+                "Login clicked: id='{Id}' pwLen={PwLen} — showing LoginWait then transitioning",
                 _idField?.Text, _pwField?.Text.Length ?? 0);
-            // Transition swoosh — v95's Sound/UI.img/ScrollUp plays as the
-            // camera scrolls up to the world-select section of the map.
-            if (_sound?.GetItem("UI.img/ScrollUp") is WzSound scrollUp)
-            {
-                Game.AudioPlayer.PlayEffect(scrollUp);
-            }
             var startCam = _scene?.Camera ?? Vector2.Zero;
-            Game.StageDirector.Replace(new WorldSelectStage(
-                _loggerFactory.CreateLogger<WorldSelectStage>(),
-                _loggerFactory, _ui, _map, _sound, startCam, _cameraOffset));
+            var camOff = _cameraOffset;
+            _loginWait?.ShowAndThen(1.2f, () =>
+            {
+                if (_sound?.GetItem("UI.img/ScrollUp") is WzSound scrollUp)
+                    Game.AudioPlayer.PlayEffect(scrollUp);
+                Game.StageDirector.Replace(new WorldSelectStage(
+                    _loggerFactory.CreateLogger<WorldSelectStage>(),
+                    _loggerFactory, _ui, _map, _sound, startCam, camOff));
+            });
         });
         _btLoginIdSave = MakeButton("BtLoginIDSave", saveTextPos, () =>
         {
@@ -172,7 +175,7 @@ public sealed class LoginStage : Stage
         _btPasswdLost = MakeButton("BtPasswdLost", lostPwPos, () => _logger.LogInformation("Find P/W clicked"));
         _btNew = MakeButton("BtNew", newPos, () => _logger.LogInformation("Join clicked"));
         _btHomePage = MakeButton("BtHomePage", homePos, () => _logger.LogInformation("Website clicked"));
-        _btQuit = MakeButton("BtQuit", quitPos, () => Game.Exit());
+        _btQuit = MakeButton("BtQuit", quitPos, () => _quitConfirm!.IsVisible = true);
 
         _saveCheck = new Checkbox
         {
@@ -206,6 +209,18 @@ public sealed class LoginStage : Stage
         // Default focus on the ID field.
         _idField.IsFocused = true;
 
+        var center = new Vector2(GraphicsDevice.PresentationParameters.BackBufferWidth / 2f,
+                                 GraphicsDevice.PresentationParameters.BackBufferHeight / 2f);
+        _loginWait = new LoginWaitOverlay(_loader!, _ui, Game.Font, center)
+        {
+            OnCancel = () => _loginWait!.IsVisible = false,
+        };
+        _quitConfirm = new QuitConfirmOverlay(_loader!, _ui, Game.Font, center)
+        {
+            OnYes = () => Game.Exit(),
+            OnNo = () => _quitConfirm!.IsVisible = false,
+        };
+
         RegisterDebugItems();
         ApplyLayout();
 
@@ -229,6 +244,9 @@ public sealed class LoginStage : Stage
         // take effect immediately.
         ApplyCamera();
         ApplyLayout();
+
+        _loginWait?.Update(gameTime);
+        _quitConfirm?.Update(gameTime);
 
         _idField?.Update(gameTime);
         _pwField?.Update(gameTime);
@@ -449,6 +467,9 @@ public sealed class LoginStage : Stage
         {
             b.Draw(spriteBatch);
         }
+
+        _loginWait?.Draw(spriteBatch, Game.WhitePixel);
+        _quitConfirm?.Draw(spriteBatch, Game.WhitePixel);
     }
 
     public override void OnTextInput(char character)
@@ -459,8 +480,16 @@ public sealed class LoginStage : Stage
 
     public override void OnMouseButton(int x, int y, bool down, MouseButton button)
     {
-        if (button != MouseButton.Left)
+        if (button != MouseButton.Left) return;
+
+        if (_quitConfirm?.IsVisible == true)
         {
+            _quitConfirm.HandleMouseButton(x, y, down);
+            return;
+        }
+        if (_loginWait?.IsVisible == true)
+        {
+            _loginWait.HandleMouseButton(x, y, down);
             return;
         }
 
@@ -496,6 +525,9 @@ public sealed class LoginStage : Stage
 
     public override void OnKeyPress(Keys key)
     {
+        if (_quitConfirm?.IsVisible == true) { _quitConfirm.OnKeyPress(key); return; }
+        if (_loginWait?.IsVisible == true) { _loginWait.OnKeyPress(key); return; }
+
         switch (key)
         {
             case Keys.Tab:
