@@ -25,6 +25,11 @@ public sealed class BuffList : GamePanel
 
         var bl = ui?.GetItem("UIWindow2.img/BuffList") as WzProperty;
         _buffSlot = bl?.Get("slot") is WzCanvas sc ? loader.Load(sc) : null;
+
+        // Placeholder buffs visible on start
+        _buffs.Add(("Magic Guard",    1800));
+        _buffs.Add(("Speed Infusion",  300));
+        _buffs.Add(("Warrior Elixir",  900));
     }
 
     public void AddBuff(string name, int seconds) => _buffs.Add((name, seconds));
