@@ -1,6 +1,8 @@
 using MapleClaude.App;
 using MapleClaude.Debug;
 using MapleClaude.Map;
+using MapleClaude.Net;
+using MapleClaude.Net.Senders;
 using MapleClaude.Render;
 using MapleClaude.UI;
 using MapleClaude.Wz;
@@ -18,6 +20,18 @@ namespace MapleClaude.Stages;
 /// </summary>
 public sealed class CharSelectStage : Stage
 {
+    /// <summary>Character data sent by <c>SelectWorldResult</c> packet.</summary>
+    public sealed class CharInfo
+    {
+        public int    Id;
+        public string Name   = string.Empty;
+        public int    Level  = 1;
+        public int    JobId  = 0;
+        public int    MapId  = 0;
+        public int    Face   = 20000;
+        public int    Hair   = 30000;
+    }
+
     private const int SlotCount = 6;
     private const string DebugCat = "CharSelect";
 
@@ -60,6 +74,21 @@ public sealed class CharSelectStage : Stage
 
     // State
     private int _selectedSlot = -1;
+    private readonly List<CharInfo> _chars = new();
+
+    /// <summary>Set by WorldSelectStage after receiving SelectWorldResult packet.</summary>
+    public void LoadChars(IEnumerable<CharInfo> chars)
+    {
+        _chars.Clear();
+        _chars.AddRange(chars);
+        _selectedSlot = -1;
+        if (_btSelect != null) _btSelect.Enabled = false;
+        if (_btDelete != null) _btDelete.Enabled = false;
+        _logger.LogInformation("CharSelectStage: loaded {N} chars from server", _chars.Count);
+    }
+
+    public int SelectedCharId => _selectedSlot >= 0 && _selectedSlot < _chars.Count
+        ? _chars[_selectedSlot].Id : -1;
     private int _page;
 
     // Camera scroll
@@ -159,6 +188,7 @@ public sealed class CharSelectStage : Stage
 
     public override void Update(GameTime gameTime)
     {
+        Game.Session.DrainQueue();
         if (_scene != null)
         {
             var dt = (float)gameTime.ElapsedGameTime.TotalSeconds;
@@ -199,15 +229,32 @@ public sealed class CharSelectStage : Stage
 
     private void DrawSlots(SpriteBatch sb)
     {
+        var offset = _page * SlotCount;
         for (var i = 0; i < SlotCount; i++)
         {
-            var pos = SlotPos(i);
+            var pos    = SlotPos(i);
+            var absIdx = offset + i;
+            var hasChar = absIdx < _chars.Count;
+            var ch = hasChar ? _chars[absIdx] : null;
 
             _charSlot?.Draw(sb, pos);
-            _charEmpty?.Draw(sb, pos);
+            if (hasChar)
+            {
+                // Character exists — show name and level
+                if (Game.Font != null)
+                {
+                    var namePos = pos + new Vector2(-30, 72);
+                    Game.Font.Draw(sb, ch!.Name, namePos, Color.White);
+                    Game.Font.Draw(sb, $"Lv.{ch.Level}", namePos + new Vector2(0, 13),
+                        new Color(220, 200, 100));
+                }
+            }
+            else
+            {
+                _charEmpty?.Draw(sb, pos);
+            }
 
-            // Selection highlight
-            if (i == _selectedSlot)
+            if (i == _selectedSlot - offset)
                 _effectSelected?.Draw(sb, pos);
             else
                 _effectNormal?.Draw(sb, pos + new Vector2(0, 10));
@@ -294,7 +341,55 @@ public sealed class CharSelectStage : Stage
     private void OnSelectClicked()
     {
         if (_selectedSlot < 0) return;
-        _logger.LogInformation("CharSelect: BtSelect — slot {Slot} — entering game", _selectedSlot);
+        var charId = SelectedCharId;
+        _logger.LogInformation("CharSelect: BtSelect slot={Slot} charId={Id}", _selectedSlot, charId);
+
+        if (Game.Session.IsConnected && charId > 0)
+        {
+            // Send SelectCharacter — server replies with SelectCharacterResult (host:port)
+            // then we reconnect to channel server and send MigrateIn
+            Game.Session.RegisterHandler(InHeader.SelectCharacterResult, pkt =>
+            {
+                var result = pkt.DecodeByte();
+                pkt.DecodeByte(); // 0
+                if (result != 0)
+                {
+                    _notice?.Show($"Select character failed (code {result}).");
+                    return;
+                }
+                var ipBytes   = pkt.DecodeArray(4);
+                var host      = $"{ipBytes[0]}.{ipBytes[1]}.{ipBytes[2]}.{ipBytes[3]}";
+                var port      = pkt.DecodeShort();
+                var receivedId = pkt.DecodeInt();
+                _logger.LogInformation("SelectCharacterResult: migrate to {Host}:{Port}", host, port);
+                MigrateToChannel(host, port, charId);
+            });
+            Game.Session.Send(LoginSender.SelectCharacter(charId));
+        }
+        else
+        {
+            // UI-only mode
+            EnterGameStage();
+        }
+    }
+
+    private async void MigrateToChannel(string host, int port, int charId)
+    {
+        try
+        {
+            await Game.Session.ConnectChannelAsync(host, port).ConfigureAwait(false);
+            Game.Session.Send(LoginSender.MigrateIn(charId, new byte[8]));
+            EnterGameStage();
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Failed to migrate to channel {Host}:{Port}", host, port);
+            _notice?.Show("Connection to game server failed.");
+        }
+    }
+
+    private void EnterGameStage()
+    {
         Game.StageDirector.Replace(new GameStage(
             _loggerFactory.CreateLogger<GameStage>(),
             _loggerFactory, _ui, _map, _sound, Game.CharWz, Game.NpcWz));

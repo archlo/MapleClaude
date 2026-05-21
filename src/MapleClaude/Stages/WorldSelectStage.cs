@@ -1,6 +1,9 @@
 using MapleClaude.App;
 using MapleClaude.Debug;
 using MapleClaude.Map;
+using MapleClaude.Net;
+using MapleClaude.Net.Handlers;
+using MapleClaude.Net.Senders;
 using MapleClaude.Render;
 using MapleClaude.Wz;
 using Microsoft.Extensions.Logging;
@@ -177,6 +180,7 @@ public sealed class WorldSelectStage : Stage
             return;
         }
         var dt = (float)gameTime.ElapsedGameTime.TotalSeconds;
+        Game.Session.DrainQueue();
         _scrollT = Math.Min(1f, _scrollT + dt / ScrollDuration);
         var sp = _scene.StartPoint ?? Vector2.Zero;
         var target = sp + _cameraOffset;
@@ -334,13 +338,39 @@ public sealed class WorldSelectStage : Stage
         }
         _btGoWorld = MakeButton("Login.img/WorldSelect/BtGoworld", () =>
         {
-            _logger.LogInformation("BtGoworld clicked — entering CharSelectStage world={W} ch={C}",
+            _logger.LogInformation("BtGoworld clicked — SelectWorld world={W} ch={C}",
                 _selectedWorldId, _selectedChannelId);
-            Game.StageDirector.Replace(new CharSelectStage(
-                _loggerFactory.CreateLogger<CharSelectStage>(),
-                _loggerFactory, _ui, _map, _sound,
-                _selectedWorldId, _selectedChannelId,
-                _scene?.Camera ?? Vector2.Zero, _cameraOffset));
+            // Send SelectWorld to Kinoko; transition on SelectWorldResult
+            if (Game.Session.IsConnected)
+            {
+                // Re-register SelectWorldResult handler for this selection
+                Game.Session.RegisterHandler(InHeader.SelectWorldResult, pkt =>
+                {
+                    var result = pkt.DecodeByte();
+                    if (result != 0) return;
+                    var charCount = pkt.DecodeByte();
+                    var chars = new List<CharSelectStage.CharInfo>(charCount);
+                    for (var i = 0; i < charCount; i++)
+                        chars.Add(LoginPacketHandler.ReadCharInfo(pkt));
+                    var stage = new CharSelectStage(
+                        _loggerFactory.CreateLogger<CharSelectStage>(),
+                        _loggerFactory, _ui, _map, _sound,
+                        _selectedWorldId, _selectedChannelId,
+                        _scene?.Camera ?? Vector2.Zero, _cameraOffset);
+                    Game.StageDirector.Replace(stage);
+                    stage.LoadChars(chars);
+                });
+                Game.Session.Send(LoginSender.SelectWorld(_selectedWorldId, _selectedChannelId));
+            }
+            else
+            {
+                // No connection — UI-only mode
+                Game.StageDirector.Replace(new CharSelectStage(
+                    _loggerFactory.CreateLogger<CharSelectStage>(),
+                    _loggerFactory, _ui, _map, _sound,
+                    _selectedWorldId, _selectedChannelId,
+                    _scene?.Camera ?? Vector2.Zero, _cameraOffset));
+            }
         });
         ApplyChannelLayout();
         _logger.LogInformation("ChannelGrid assets loaded");

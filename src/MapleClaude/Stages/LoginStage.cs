@@ -1,6 +1,9 @@
 using MapleClaude.App;
 using MapleClaude.Debug;
 using MapleClaude.Map;
+using MapleClaude.Net;
+using MapleClaude.Net.Handlers;
+using MapleClaude.Net.Senders;
 using MapleClaude.Render;
 using MapleClaude.UI;
 using MapleClaude.Wz;
@@ -53,6 +56,14 @@ public sealed class LoginStage : Stage
 
     private LoginWaitOverlay? _loginWait;
     private QuitConfirmOverlay? _quitConfirm;
+    private LoginPacketHandler? _netHandler;
+    private byte[]? _clientKey;
+
+    // Kinoko login server address — configurable via env var MAPLE_LOGIN_HOST
+    private static string LoginHost =>
+        System.Environment.GetEnvironmentVariable("MAPLE_LOGIN_HOST") ?? "127.0.0.1";
+    private static int LoginPort =>
+        int.TryParse(System.Environment.GetEnvironmentVariable("MAPLE_LOGIN_PORT"), out var p) ? p : 8484;
 
     private readonly List<Button> _allButtons = new();
 
@@ -148,19 +159,47 @@ public sealed class LoginStage : Stage
 
         _btLogin = MakeButton("BtLogin", loginBtnPos, () =>
         {
-            _logger.LogInformation(
-                "Login clicked: id='{Id}' pwLen={PwLen} — showing LoginWait then transitioning",
-                _idField?.Text, _pwField?.Text.Length ?? 0);
+            var id  = _idField?.Text ?? string.Empty;
+            var pw  = _pwField?.Text  ?? string.Empty;
+            if (id.Length == 0)  { _notice?.Show("Enter your MapleStory ID."); return; }
+            if (pw.Length < 5)   { _notice?.Show("Password too short (min 5 chars)."); return; }
+
+            _logger.LogInformation("Login clicked: id='{Id}'", id);
+
+            // Show connecting overlay; actual transition happens on CheckPasswordResult OK
+            _loginWait!.IsVisible = true;
             var startCam = _scene?.Camera ?? Vector2.Zero;
-            var camOff = _cameraOffset;
-            _loginWait?.ShowAndThen(1.2f, () =>
+            var camOff   = _cameraOffset;
+
+            // Wire the success callback now (we have startCam in scope)
+            if (_netHandler != null)
             {
-                if (_sound?.GetItem("UI.img/ScrollUp") is WzSound scrollUp)
-                    Game.AudioPlayer.PlayEffect(scrollUp);
-                Game.StageDirector.Replace(new WorldSelectStage(
-                    _loggerFactory.CreateLogger<WorldSelectStage>(),
-                    _loggerFactory, _ui, _map, _sound, startCam, camOff));
-            });
+                _netHandler.OnLoginFail = msg =>
+                {
+                    _loginWait!.IsVisible = false;
+                    _notice?.Show(msg);
+                };
+                _netHandler.OnWorldInfoEnd = () =>
+                {
+                    // World list collected — transition to WorldSelect
+                    if (_sound?.GetItem("UI.img/ScrollUp") is WzSound scrollUp)
+                        Game.AudioPlayer.PlayEffect(scrollUp);
+                    Game.StageDirector.Replace(new WorldSelectStage(
+                        _loggerFactory.CreateLogger<WorldSelectStage>(),
+                        _loggerFactory, _ui, _map, _sound, startCam, camOff));
+                };
+            }
+
+            // Send CheckPassword to Kinoko
+            if (Game.Session.IsConnected)
+            {
+                Game.Session.Send(LoginSender.CheckPassword(id, pw));
+            }
+            else
+            {
+                _loginWait!.IsVisible = false;
+                _notice?.Show("Not connected to server. Check MAPLE_LOGIN_HOST.");
+            }
         });
         _btLoginIdSave = MakeButton("BtLoginIDSave", saveTextPos, () =>
         {
@@ -224,6 +263,25 @@ public sealed class LoginStage : Stage
         RegisterDebugItems();
         ApplyLayout();
 
+        // Connect to Kinoko login server and register packet handlers
+        _netHandler = new LoginPacketHandler(
+            _loggerFactory.CreateLogger<LoginPacketHandler>(), _loggerFactory);
+
+        _netHandler.OnLoginFail     = msg => _notice?.Show(msg);
+        _netHandler.AliveAckRequested = () => Game.Session.Send(LoginSender.AliveAck());
+        _netHandler.OnSelectCharOk  = (host, port) =>
+        {
+            // Server sent us a channel to migrate to — handled by WorldSelectStage
+        };
+
+        _netHandler.RegisterAll(Game.Session);
+        Game.Session.OnDisconnected = () =>
+            _loginWait?.IsVisible == true ?
+                (_notice?.Show("Connection lost."), _loginWait!.IsVisible = false) :
+                (object?)null;
+
+        _ = ConnectToLoginServerAsync();
+
         _logger.LogInformation(
             "LoginStage: scene={SceneOk} signboard={Sign} idField={Id} pwField={Pw} buttons={ButtonCount}",
             _scene != null, _signboard != null, _idBg != null, _pwBg != null, _allButtons.Count);
@@ -245,6 +303,7 @@ public sealed class LoginStage : Stage
         ApplyCamera();
         ApplyLayout();
 
+        Game.Session.DrainQueue();   // dispatch incoming server packets on game thread
         _loginWait?.Update(gameTime);
         _quitConfirm?.Update(gameTime);
 
@@ -551,6 +610,20 @@ public sealed class LoginStage : Stage
                     _pwField.OnTextInput('\b');
                 }
                 break;
+        }
+    }
+
+    private async Task ConnectToLoginServerAsync()
+    {
+        try
+        {
+            await Game.Session.ConnectLoginAsync(LoginHost, LoginPort).ConfigureAwait(false);
+            _logger.LogInformation("Login server connected — sending WorldInfoRequest");
+            Game.Session.Send(LoginSender.WorldInfoRequest());
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Could not connect to login server {H}:{P}", LoginHost, LoginPort);
         }
     }
 

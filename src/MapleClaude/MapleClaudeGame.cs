@@ -66,6 +66,9 @@ public sealed class MapleClaudeGame : Game
     public WzPackage? CharWz => _charWz;
     public WzPackage? NpcWz => _npcWz;
 
+    /// <summary>Network session — null until a stage calls ConnectLoginAsync.</summary>
+    public MapleSession Session { get; }
+
     /// <summary>Shared registry of tunable items exposed to the debug window.</summary>
     public DebugRegistry DebugRegistry { get; }
 
@@ -86,6 +89,7 @@ public sealed class MapleClaudeGame : Game
         _loggerFactory = loggerFactory;
         _wzDir = ResolveWzDir(config);
         AudioPlayer = new WzAudioPlayer(loggerFactory.CreateLogger<WzAudioPlayer>());
+        Session     = new MapleSession(loggerFactory.CreateLogger<MapleSession>(), loggerFactory);
         DebugRegistry = debugRegistry;
 
         // v95 native resolution is 800×600; larger windows leave black borders
@@ -242,6 +246,7 @@ public sealed class MapleClaudeGame : Game
 
     protected override void UnloadContent()
     {
+        Session.Dispose();
         AudioPlayer.Dispose();
         _cursorLoader?.Dispose();
         _uiWz?.Dispose();
