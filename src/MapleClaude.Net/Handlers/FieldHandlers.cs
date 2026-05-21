@@ -477,14 +477,35 @@ public sealed class FieldHandlers
         var prev        = p.ReadBool();
         var next        = p.ReadBool();
         var text        = p.ReadString();
-        OnScriptMessage?.Invoke(new ScriptMessageArgs
+        var args = new ScriptMessageArgs
         {
             SpeakerId = speakerId,
             MsgType   = msgType,
             Text      = text,
             HasPrev   = prev,
             HasNext   = next,
-        });
+        };
+        try
+        {
+            switch (msgType)
+            {
+                case 5: // ASK_TEXT
+                    args.DefaultText = p.ReadString();
+                    args.MinLength   = p.ReadShort();
+                    args.MaxLength   = p.ReadShort();
+                    break;
+                case 6: // ASK_NUMBER
+                    args.DefaultNum = p.ReadInt();
+                    args.MinNum     = p.ReadInt();
+                    args.MaxNum     = p.ReadInt();
+                    break;
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogDebug(ex, "ScriptMessage trailing decode msgType={T}", msgType);
+        }
+        OnScriptMessage?.Invoke(args);
     }
 
     // ── FuncKeyMappedInit ─────────────────────────────────────────────────────
@@ -608,8 +629,13 @@ public sealed class ScriptMessageArgs
 {
     public int    SpeakerId;
     public byte   MsgType;
-    public string Text     = string.Empty;
+    public string Text        = string.Empty;
     public bool   HasPrev, HasNext;
+    // ASK_TEXT (5)
+    public string DefaultText = string.Empty;
+    public int    MinLength, MaxLength;
+    // ASK_NUMBER (6)
+    public int    DefaultNum, MinNum, MaxNum;
 }
 
 public sealed class FuncKeyEntry   { public int KeyIndex, ActionId; public byte Type; }

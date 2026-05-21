@@ -375,11 +375,11 @@ public sealed class GameStage : Stage
 
         fh.OnNpcEnter += args =>
         {
-            // Update or add NPC in the npc list
-            var existing = _npcs.FirstOrDefault(n => n.NpcId == args.TemplateId);
+            var existing = _npcs.FirstOrDefault(n => n.ObjId == args.ObjId);
             if (existing is null)
             {
                 var npc = new NpcLook(args.TemplateId, new Vector2(args.X, args.Y), Game.Font);
+                npc.ObjId = args.ObjId;
                 npc.Load(_loader!, _npcWz);
                 npc.FaceLeft(args.FacingLeft);
                 _npcs.Add(npc);
@@ -388,7 +388,7 @@ public sealed class GameStage : Stage
 
         fh.OnNpcLeave += objId =>
         {
-            _npcs.RemoveAll(n => n.NpcId == objId);
+            _npcs.RemoveAll(n => n.ObjId == objId);
         };
 
         fh.OnUserEnter += args =>
@@ -444,11 +444,74 @@ public sealed class GameStage : Stage
         fh.OnScriptMessage += args =>
         {
             if (_npcTalk is null) return;
-            _npcTalk.Show(args.Text,
-                args.MsgType == 4 ? NpcTalk.DialogType.YesNo
-              : args.HasPrev && args.HasNext ? NpcTalk.DialogType.PrevNext
-              : args.HasNext ? NpcTalk.DialogType.Next
-              : NpcTalk.DialogType.Ok);
+            var msgType = args.MsgType;
+            switch (msgType)
+            {
+                case 2: // ASK_MENU
+                    var choices = ParseMenuChoices(args.Text);
+                    _npcTalk.ShowMenu(args.Text, choices);
+                    _npcTalk.OnMenuChoice = choice =>
+                    {
+                        if (Game.Session.IsConnected)
+                            Game.Session.Send(GameSender.ScriptAnswerMenu(choice));
+                    };
+                    break;
+                case 4: // ASK_YESNO
+                    _npcTalk.Show(args.Text, NpcTalk.DialogType.YesNo);
+                    _npcTalk.OnYes = () =>
+                    {
+                        if (Game.Session.IsConnected)
+                            Game.Session.Send(GameSender.ScriptAnswerYesNo(true));
+                    };
+                    _npcTalk.OnNo = () =>
+                    {
+                        if (Game.Session.IsConnected)
+                            Game.Session.Send(GameSender.ScriptAnswerYesNo(false));
+                    };
+                    break;
+                case 5: // ASK_TEXT
+                    _npcTalk.ShowAskText(args.Text, args.DefaultText, args.MinLength, args.MaxLength);
+                    _npcTalk.OnTextConfirm = text =>
+                    {
+                        if (Game.Session.IsConnected)
+                            Game.Session.Send(GameSender.ScriptAnswerText(text));
+                    };
+                    _npcTalk.OnNo = () =>
+                    {
+                        if (Game.Session.IsConnected)
+                            Game.Session.Send(GameSender.ScriptAnswerTextCancel());
+                    };
+                    break;
+                case 6: // ASK_NUMBER
+                    _npcTalk.ShowAskNumber(args.Text, args.DefaultNum, args.MinNum, args.MaxNum);
+                    _npcTalk.OnNumberConfirm = num =>
+                    {
+                        if (Game.Session.IsConnected)
+                            Game.Session.Send(GameSender.ScriptAnswerNumber(num));
+                    };
+                    _npcTalk.OnNo = () =>
+                    {
+                        if (Game.Session.IsConnected)
+                            Game.Session.Send(GameSender.ScriptAnswerNumberCancel());
+                    };
+                    break;
+                default: // SAY (0), any unknown type
+                    _npcTalk.Show(args.Text,
+                        args.HasPrev && args.HasNext ? NpcTalk.DialogType.PrevNext
+                      : args.HasNext                ? NpcTalk.DialogType.Next
+                      : NpcTalk.DialogType.Ok);
+                    _npcTalk.OnOk = _npcTalk.OnNext = () =>
+                    {
+                        if (Game.Session.IsConnected)
+                            Game.Session.Send(GameSender.ScriptAnswerNext(msgType));
+                    };
+                    _npcTalk.OnPrev = () =>
+                    {
+                        if (Game.Session.IsConnected)
+                            Game.Session.Send(GameSender.ScriptAnswerNext(msgType));
+                    };
+                    break;
+            }
         };
 
         fh.OnFuncKeyMappedInit += entries =>
@@ -729,9 +792,27 @@ public sealed class GameStage : Stage
             var p = _panels[i];
             if (p.IsVisible && p.HandleMouseButton(x, y, down)) return;
         }
+        // NPC click-to-talk — only when no dialog is already open
+        if (down && _npcTalk?.IsVisible != true)
+        {
+            foreach (var npc in _npcs)
+            {
+                var sp = _camera.WorldToScreen(npc.Position);
+                if (npc.GetScreenBounds(sp).Contains(x, y))
+                {
+                    if (Game.Session.IsConnected)
+                        Game.Session.Send(GameSender.UserSelectNpc(npc.ObjId));
+                    break;
+                }
+            }
+        }
     }
 
-    public override void OnTextInput(char ch) => _chatBar?.OnTextInput(ch);
+    public override void OnTextInput(char ch)
+    {
+        if (_npcTalk?.IsVisible == true) { _npcTalk.OnTextInput(ch); return; }
+        _chatBar?.OnTextInput(ch);
+    }
 
     public override void OnKeyPress(Keys key)
     {
@@ -906,5 +987,27 @@ public sealed class GameStage : Stage
         var npc = new NpcLook(id, worldPos, Game.Font) { Name = name };
         npc.Load(_loader!, _npcWz);
         _npcs.Add(npc);
+    }
+
+    // Parses #L0#choice#l menu anchors from a script text, or falls back to newline-split.
+    private static IReadOnlyList<string> ParseMenuChoices(string text)
+    {
+        var results = new List<string>();
+        // Try #L<n>#...#l pattern first
+        var matches = System.Text.RegularExpressions.Regex.Matches(text, @"#L\d+#(.+?)#l");
+        if (matches.Count > 0)
+        {
+            foreach (System.Text.RegularExpressions.Match m in matches)
+                results.Add(m.Groups[1].Value.Trim());
+            return results;
+        }
+        // Fallback: newline-separated lines, stripping common format codes
+        foreach (var line in text.Split(new[] { "\r\n", "\n" }, StringSplitOptions.RemoveEmptyEntries))
+        {
+            var clean = System.Text.RegularExpressions.Regex.Replace(line, @"#[A-Za-z0-9]+#?", "").Trim();
+            if (!string.IsNullOrEmpty(clean))
+                results.Add(clean);
+        }
+        return results;
     }
 }

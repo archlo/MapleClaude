@@ -13,7 +13,7 @@ namespace MapleClaude.UI.Game;
 /// </summary>
 public sealed class NpcTalk : GamePanel
 {
-    public enum DialogType { Ok, YesNo, Next, PrevNext }
+    public enum DialogType { Ok, YesNo, Next, PrevNext, Menu, AskText, AskNumber }
 
     private readonly WzSprite? _background;
     private readonly Button? _btOk;
@@ -23,65 +23,168 @@ public sealed class NpcTalk : GamePanel
     private readonly Button? _btPrev;
     private readonly BuiltInFont? _font;
     private readonly List<Button> _allButtons = new();
+    private readonly TextField _inputField = new() { Width = 300, Height = 22 };
 
     private string _text = string.Empty;
     private DialogType _dialogType = DialogType.Ok;
+    private List<string> _menuItems = new();
+    private int _menuHover = -1;
+    private int _minNum, _maxNum;
+    private bool _numberOnly;
 
+    // ── Callbacks ─────────────────────────────────────────────────────────────
     public Action? OnOk { get; set; }
     public Action? OnYes { get; set; }
     public Action? OnNo { get; set; }
     public Action? OnNext { get; set; }
     public Action? OnPrev { get; set; }
+    public Action<int>? OnMenuChoice { get; set; }
+    public Action<string>? OnTextConfirm { get; set; }
+    public Action<int>? OnNumberConfirm { get; set; }
 
     public NpcTalk(WzTextureLoader loader, WzPackage? ui, BuiltInFont? font)
     {
         _font = font;
+        _inputField.Font = font;
         IsVisible = false;
         Position = new Vector2(170, 380);
 
         var npc = ui?.GetItem("UIWindow.img/NpcTalk") as WzProperty;
         _background = npc?.Get("backgrnd") is WzCanvas bc ? loader.Load(bc) : null;
 
-        _btOk = MakeButton(loader, npc, "BtOK", () => { IsVisible = false; OnOk?.Invoke(); });
-        _btYes = MakeButton(loader, npc, "BtYes", () => { IsVisible = false; OnYes?.Invoke(); });
-        _btNo = MakeButton(loader, npc, "BtNo", () => { IsVisible = false; OnNo?.Invoke(); });
-        _btNext = MakeButton(loader, npc, "BtNext", () => OnNext?.Invoke());
-        _btPrev = MakeButton(loader, npc, "BtPrev", () => OnPrev?.Invoke());
+        _btOk   = MakeButton(loader, npc, "BtOK");
+        _btYes  = MakeButton(loader, npc, "BtYes");
+        _btNo   = MakeButton(loader, npc, "BtNo");
+        _btNext = MakeButton(loader, npc, "BtNext");
+        _btPrev = MakeButton(loader, npc, "BtPrev");
 
-        ApplyLayout();
+        if (_btOk   != null) _btOk.OnClick   = HandleOk;
+        if (_btYes  != null) _btYes.OnClick  = HandleYes;
+        if (_btNo   != null) _btNo.OnClick   = HandleNo;
+        if (_btNext != null) _btNext.OnClick = HandleNext;
+        if (_btPrev != null) _btPrev.OnClick = HandlePrev;
     }
+
+    // ── Show methods ──────────────────────────────────────────────────────────
 
     public void Show(string text, DialogType type = DialogType.Ok)
     {
-        _text = text;
+        _text       = text;
         _dialogType = type;
-        IsVisible = true;
+        _menuItems.Clear();
+        IsVisible   = true;
     }
+
+    public void ShowMenu(string text, IReadOnlyList<string> items)
+    {
+        _text       = text;
+        _dialogType = DialogType.Menu;
+        _menuItems  = new List<string>(items);
+        _menuHover  = -1;
+        IsVisible   = true;
+    }
+
+    public void ShowAskText(string text, string defaultText = "", int minLen = 0, int maxLen = 24)
+    {
+        _text            = text;
+        _dialogType      = DialogType.AskText;
+        _menuItems.Clear();
+        _numberOnly      = false;
+        _inputField.Text = defaultText;
+        _inputField.MaxLength = Math.Max(1, maxLen > 0 ? maxLen : 24);
+        _inputField.IsFocused = true;
+        IsVisible        = true;
+    }
+
+    public void ShowAskNumber(string text, int defaultNum = 0, int minNum = 0, int maxNum = 999999)
+    {
+        _text            = text;
+        _dialogType      = DialogType.AskNumber;
+        _menuItems.Clear();
+        _numberOnly      = true;
+        _minNum          = minNum;
+        _maxNum          = maxNum;
+        _inputField.Text = defaultNum.ToString();
+        _inputField.MaxLength = 10;
+        _inputField.IsFocused = true;
+        IsVisible        = true;
+    }
+
+    // ── Button handlers ───────────────────────────────────────────────────────
+
+    private void HandleOk()
+    {
+        switch (_dialogType)
+        {
+            case DialogType.AskText:
+                var txt = _inputField.Text;
+                _inputField.Clear();
+                IsVisible = false;
+                OnTextConfirm?.Invoke(txt);
+                break;
+            case DialogType.AskNumber:
+                var raw = _inputField.Text;
+                _inputField.Clear();
+                IsVisible = false;
+                if (int.TryParse(raw, out var num))
+                    OnNumberConfirm?.Invoke(Math.Clamp(num, _minNum, _maxNum));
+                break;
+            default:
+                IsVisible = false;
+                OnOk?.Invoke();
+                break;
+        }
+    }
+
+    private void HandleYes()  { IsVisible = false; OnYes?.Invoke(); }
+    private void HandleNo()   { IsVisible = false; OnNo?.Invoke(); }
+    private void HandleNext() { OnNext?.Invoke(); }
+    private void HandlePrev() { OnPrev?.Invoke(); }
+
+    // ── Layout ────────────────────────────────────────────────────────────────
+
+    private int DialogHeight => _dialogType switch
+    {
+        DialogType.Menu      => 80 + Math.Max(1, _menuItems.Count) * 20 + 10,
+        DialogType.AskText   => 160,
+        DialogType.AskNumber => 160,
+        _                    => 130,
+    };
 
     private void ApplyLayout()
     {
-        if (_btOk != null) _btOk.Position = Position + new Vector2(430, 105);
-        if (_btYes != null) _btYes.Position = Position + new Vector2(390, 105);
-        if (_btNo != null) _btNo.Position = Position + new Vector2(430, 105);
-        if (_btNext != null) _btNext.Position = Position + new Vector2(430, 105);
-        if (_btPrev != null) _btPrev.Position = Position + new Vector2(390, 105);
+        var h = DialogHeight;
+        var btnY = Position.Y + h - 26;
+        if (_btOk   != null) _btOk.Position   = new Vector2(Position.X + 430, btnY);
+        if (_btYes  != null) _btYes.Position  = new Vector2(Position.X + 390, btnY);
+        if (_btNo   != null) _btNo.Position   = new Vector2(Position.X + 430, btnY);
+        if (_btNext != null) _btNext.Position = new Vector2(Position.X + 430, btnY);
+        if (_btPrev != null) _btPrev.Position = new Vector2(Position.X + 390, btnY);
+        _inputField.Position = new Vector2(Position.X + 70, Position.Y + 85);
     }
 
     public override void Update(GameTime gameTime) => ApplyLayout();
+
+    // ── Draw ──────────────────────────────────────────────────────────────────
 
     public override void Draw(SpriteBatch sb, Texture2D white)
     {
         if (!IsVisible) return;
 
+        ApplyLayout();
+        var h = DialogHeight;
+
+        // Background
         if (_background != null)
             _background.Draw(sb, Position + new Vector2(234, 65));
         else
         {
-            sb.Draw(white, new Rectangle((int)Position.X, (int)Position.Y, 470, 130), new Color(15, 15, 25, 230));
-            DrawBorder(sb, white, new Rectangle((int)Position.X, (int)Position.Y, 470, 130));
+            sb.Draw(white, new Rectangle((int)Position.X, (int)Position.Y, 470, h), new Color(15, 15, 25, 230));
+            DrawBorder(sb, white, new Rectangle((int)Position.X, (int)Position.Y, 470, h));
         }
 
-        _font?.Draw(sb, _text, Position + new Vector2(70, 12), Color.White);
+        // Main text (may contain newlines — draw each line)
+        DrawText(sb, _text, Position + new Vector2(10, 10), Color.White, 450);
 
         switch (_dialogType)
         {
@@ -99,29 +202,162 @@ public sealed class NpcTalk : GamePanel
                 _btPrev?.Draw(sb);
                 _btNext?.Draw(sb);
                 break;
+            case DialogType.Menu:
+                DrawMenuItems(sb, white);
+                break;
+            case DialogType.AskText:
+            case DialogType.AskNumber:
+                DrawInputField(sb, white);
+                _btOk?.Draw(sb);
+                _btNo?.Draw(sb);
+                break;
         }
     }
+
+    private void DrawMenuItems(SpriteBatch sb, Texture2D white)
+    {
+        if (_font is null) return;
+        var lineH = _font.LineHeight + 4;
+        for (var i = 0; i < _menuItems.Count; i++)
+        {
+            var itemPos = new Vector2(Position.X + 10, Position.Y + 72 + i * lineH);
+            var itemBg  = new Rectangle((int)itemPos.X - 2, (int)itemPos.Y - 1, 450, lineH);
+            if (_menuHover == i)
+                sb.Draw(white, itemBg, new Color(80, 70, 40, 160));
+            var color = _menuHover == i ? new Color(255, 220, 80) : Color.LightYellow;
+            _font.Draw(sb, $"{i + 1}. {_menuItems[i]}", itemPos, color);
+        }
+    }
+
+    private void DrawInputField(SpriteBatch sb, Texture2D white)
+    {
+        var bounds = _inputField.Bounds;
+        sb.Draw(white, bounds, new Color(20, 20, 35, 220));
+        DrawBorder(sb, white, bounds);
+        _inputField.Draw(sb, white);
+    }
+
+    // Draws text with newline wrapping at maxWidth.
+    private void DrawText(SpriteBatch sb, string text, Vector2 origin, Color color, int maxWidth)
+    {
+        if (_font is null || string.IsNullOrEmpty(text)) return;
+        var lh   = _font.LineHeight + 2;
+        var pos  = origin;
+        // Strip MapleStory format codes before display
+        var clean = StripFormatCodes(text);
+        foreach (var rawLine in clean.Split('\n'))
+        {
+            var line = rawLine.TrimEnd('\r');
+            _font.Draw(sb, line, pos, color);
+            pos.Y += lh;
+        }
+    }
+
+    private static string StripFormatCodes(string text)
+    {
+        // Remove #Ln#...#l menu anchors and common codes (#b #d #r #k etc.)
+        var sb = new System.Text.StringBuilder(text.Length);
+        var i = 0;
+        while (i < text.Length)
+        {
+            if (text[i] == '#' && i + 1 < text.Length)
+            {
+                // #L<digit>#
+                if (text[i + 1] == 'L')
+                {
+                    var j = i + 2;
+                    while (j < text.Length && char.IsDigit(text[j])) j++;
+                    if (j < text.Length && text[j] == '#') { i = j + 1; continue; }
+                }
+                // #l (end of list item anchor)
+                if (text[i + 1] == 'l') { i += 2; continue; }
+                // single-letter codes: #b #d #r #k #n #e #f etc.
+                if (i + 1 < text.Length && char.IsLetter(text[i + 1])) { i += 2; continue; }
+            }
+            sb.Append(text[i]);
+            i++;
+        }
+        return sb.ToString();
+    }
+
+    // ── Input routing ─────────────────────────────────────────────────────────
 
     public override bool HandleMouseButton(int x, int y, bool down)
     {
         if (!IsVisible) return false;
+
         foreach (var b in _allButtons)
             if (b.HandleMouseButton(x, y, down)) return true;
-        return new Rectangle((int)Position.X, (int)Position.Y, 470, 130).Contains(x, y);
+
+        if (_dialogType == DialogType.Menu && _menuItems.Count > 0)
+        {
+            var lh = (_font?.LineHeight ?? 14) + 4;
+            for (var i = 0; i < _menuItems.Count; i++)
+            {
+                var itemRect = new Rectangle(
+                    (int)Position.X + 8,
+                    (int)Position.Y + 71 + i * lh,
+                    450, lh);
+                if (itemRect.Contains(x, y))
+                {
+                    if (down)
+                    {
+                        _menuHover = i;
+                    }
+                    else
+                    {
+                        IsVisible = false;
+                        OnMenuChoice?.Invoke(i);
+                    }
+                    return true;
+                }
+            }
+            _menuHover = -1;
+        }
+
+        if (_dialogType is DialogType.AskText or DialogType.AskNumber)
+        {
+            _inputField.HandleMouseButton(x, y, down);
+        }
+
+        return new Rectangle((int)Position.X, (int)Position.Y, 470, DialogHeight).Contains(x, y);
     }
 
     public override bool OnKeyPress(Keys key)
     {
         if (!IsVisible) return false;
-        if (key == Keys.Enter) { IsVisible = false; OnOk?.Invoke(); return true; }
+
+        if (_dialogType is DialogType.AskText or DialogType.AskNumber)
+        {
+            var kb = Keyboard.GetState();
+            if (_inputField.OnKeyPress(key, kb)) return true;
+            if (key == Keys.Enter) { HandleOk(); return true; }
+            if (key == Keys.Escape) { IsVisible = false; OnNo?.Invoke(); return true; }
+            return true;
+        }
+
+        if (key == Keys.Enter)  { HandleOk(); return true; }
+        if (key == Keys.Escape) { IsVisible = false; OnNo?.Invoke(); return true; }
         return true;
     }
 
-    private Button? MakeButton(WzTextureLoader loader, WzProperty? root, string name, Action onClick)
+    public override void OnTextInput(char character)
+    {
+        if (!IsVisible) return;
+        if (_dialogType is DialogType.AskText or DialogType.AskNumber)
+        {
+            if (_numberOnly && !char.IsDigit(character) && character != '-') return;
+            _inputField.OnTextInput(character);
+        }
+    }
+
+    // ── Helpers ───────────────────────────────────────────────────────────────
+
+    private Button? MakeButton(WzTextureLoader loader, WzProperty? root, string name)
     {
         var pr = root?.Get(name) as WzProperty;
         if (pr is null) return null;
-        var b = new Button(loader, pr) { OnClick = onClick };
+        var b = new Button(loader, pr);
         _allButtons.Add(b);
         return b;
     }

@@ -16,6 +16,7 @@ public sealed class NpcLook
     private readonly int _npcId;
     private readonly BuiltInFont? _font;
     public int NpcId => _npcId;
+    public int ObjId { get; set; }
 
     // Animations indexed by state name → ordered frames
     private readonly Dictionary<string, List<(WzSprite sprite, int delayMs)>> _anims = new();
@@ -174,6 +175,11 @@ public sealed class NpcLook
     }
 
     public void FaceLeft(bool left) => _facingLeft = left;
+
+    public Rectangle GetScreenBounds(Vector2 screenPos) =>
+        new((int)(screenPos.X - PlaceholderW / 2f),
+            (int)(screenPos.Y - PlaceholderH),
+            PlaceholderW, PlaceholderH);
 
     private static WzSprite? LoadFrame(WzTextureLoader loader, WzProperty frameNode)
     {
