@@ -19,6 +19,7 @@ public enum Stance
     Sit,
     Prone,
     ProneStab,
+    Swing,
     Dead,
 }
 
@@ -38,6 +39,9 @@ public static class StanceExtensions
         Stance.Sit => "sit",
         Stance.Prone => "prone",
         Stance.ProneStab => "proneStab",
+        // v95 one-handed-sword basic swing; CharacterRenderer falls back to a
+        // resolvable key if the body doesn't have this exact animation.
+        Stance.Swing => "swingO1",
         Stance.Dead => "dead",
         _ => "stand1",
     };

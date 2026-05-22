@@ -104,7 +104,14 @@ public sealed class GameStage : Stage
     // One-shot debug-log latch for the not-yet-implemented MobMove(227)
     // outgoing path; see comment block in Update.
     private bool _loggedMobMoveTodo;
-    private bool _loggedMeleeAttackTodo;
+
+    // Melee attack pacing.
+    private float _attackCooldown;
+    private const float AttackCooldownSeconds = 0.6f;
+    private const int MeleeReachX = 120;   // px in front of the player
+    private const int MeleeReachY = 40;    // px above/below the player's foot point
+    private const int MaxMeleeTargets = 6; // v95 caps a melee swing at 6 mobs
+    private static readonly Random _attackRng = new();
 
     public GameStage(
         ILogger<GameStage> logger,
@@ -626,6 +633,11 @@ public sealed class GameStage : Stage
         // Foothold physics — only when the channel server has sent SetField and
         // a map is loaded. Drives both the CharLook visual position and the
         // outbound UserMove(44) packets.
+        if (_attackCooldown > 0f)
+        {
+            _attackCooldown -= dt;
+        }
+
         if (_physics != null)
         {
             var input = new PlayerInput
@@ -643,6 +655,9 @@ public sealed class GameStage : Stage
                     Stance.Jump   => CharLook.Stance.Jump,
                     Stance.Walk1  => CharLook.Stance.Walk1,
                     Stance.Walk2  => CharLook.Stance.Walk1,
+                    // CharLook has no swing frames; Alert is the closest
+                    // "weapon-ready" pose so the player visibly reacts.
+                    Stance.Swing  => CharLook.Stance.Alert,
                     _             => CharLook.Stance.Stand1,
                 };
                 _player.UpdateFromPhysics(dt, charLookStance, _physics.FacingLeft);
@@ -940,37 +955,72 @@ public sealed class GameStage : Stage
 
     private void DoMeleeAttack()
     {
-        if (!Game.Session.IsConnected) return;
-
-        // TODO(wire-correctness): UserMeleeAttack(47) is suppressed. The
-        // upstream wire shape (per kinoko/handler/user/AttackHandler.handlerUserMeleeAttack)
-        // is roughly:
-        //   byte fieldKey,
-        //   [optional byte if remaining==60],
-        //   int dr0, int dr1,
-        //   byte (nDamagePerMob | 16*nMobCount),
-        //   int dr2, int dr3,
-        //   int skillId, byte combatOrders, int dwKey, int crc32,
-        //   int crc, int crc (SKILLLEVELDATA::GetCrC twice),
-        //   [int keyDown if keydown skill],
-        //   byte flag, short actionAndDir,
-        //   int crc32Svr, byte attackActionType, byte attackSpeed,
-        //   int tAttackTime, int dwID,
-        //   <per mob: int mobId, byte hitAction, byte (foreAction|bLeft<<7),
-        //             byte frameIdx, byte calcDamageStatIndex,
-        //             short hitX, short hitY, short pad, short pad,
-        //             short delay, int damage[hitCount], int crc>,
-        //   short userX, short userY.
-        // The prior naive payload omitted ~17 fields and would desync the IV
-        // chain on first send. Until we wire up the full Attack/AttackInfo
-        // builders, log once and skip.
-        if (!_loggedMeleeAttackTodo)
+        if (!Game.Session.IsConnected || _physics is null)
         {
-            _loggedMeleeAttackTodo = true;
-            _logger.LogDebug(
-                "UserMeleeAttack(47) outbound is suppressed — wire shape needs the full Attack/AttackInfo " +
-                "builder per kinoko/handler/user/AttackHandler; basic attacks will not register on the server until this is fixed.");
+            return;
         }
+        if (_attackCooldown > 0f)
+        {
+            return;
+        }
+        _attackCooldown = AttackCooldownSeconds;
+
+        // Visible swing immediately (server echoes MobDamaged for the numbers).
+        _physics.TriggerAttack();
+        if (_sound?.GetItem("Weapon.img/swordL/Attack") is WzSound swing)
+        {
+            Game.AudioPlayer.PlayEffect(swing);
+        }
+
+        var pos = _physics.Position;
+        var facingLeft = _physics.FacingLeft;
+
+        // Hit box: a strip extending MeleeReachX in front of the player, MeleeReachY tall.
+        var minX = facingLeft ? pos.X - MeleeReachX : pos.X;
+        var maxX = facingLeft ? pos.X : pos.X + MeleeReachX;
+        var minY = pos.Y - MeleeReachY * 2; // mobs sit on the ground; bias the box upward
+        var maxY = pos.Y + MeleeReachY;
+
+        var targets = new List<MeleeTarget>(MaxMeleeTargets);
+        foreach (var mob in _mobs.Values)
+        {
+            if (mob.IsDead)
+            {
+                continue;
+            }
+            var mp = mob.Position;
+            if (mp.X < minX || mp.X > maxX || mp.Y < minY || mp.Y > maxY)
+            {
+                continue;
+            }
+            // Phase 4: client-chosen damage in a killable range. The v95 Kinoko
+            // server trusts the client damage value (no server-side recompute),
+            // so this is a placeholder until weapon + stat formulas land
+            // (Phase 6/7). A 1-hit swing → one damage int per mob.
+            var dmg = _attackRng.Next(30, 81);
+            targets.Add(new MeleeTarget
+            {
+                MobId = mob.MobId,
+                HitX = (short)mp.X,
+                HitY = (short)mp.Y,
+                Delay = 0,
+                Damage = new[] { dmg },
+            });
+            if (targets.Count >= MaxMeleeTargets)
+            {
+                break;
+            }
+        }
+
+        // actionAndDir: basic swing action 0, bLeft bit in 0x8000.
+        var actionAndDir = (short)(facingLeft ? 0x8000 : 0x0000);
+        var blob = MeleeAttackEncoder.Encode(
+            _fieldKey, actionAndDir, attackSpeed: 6,
+            userX: (short)pos.X, userY: (short)pos.Y,
+            targets, damagePerMob: 1);
+        Game.Session.SendRaw(blob);
+
+        _logger.LogDebug("UserMeleeAttack: {N} target(s) in range", targets.Count);
     }
 
     private void DoPickUp()

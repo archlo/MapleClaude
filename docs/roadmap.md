@@ -53,14 +53,24 @@ gauges + quickslot bar + submenu buttons), `ChatBar`, `MiniMap`,
 opens/closes via its StatusBar button or hotkey, and the user can interact
 with the controls. Server data wiring is deferred to phases 4–10.
 
-## Phase 4 — Mobs & combat
+## Phase 4 — Mobs & combat (shipped)
 
-**Scope.** `MobEnterField`, `MobMove`, `MobChangeController`. Mob sprites,
-animations, health. `UserMeleeAttack` packet construction with attack info.
-Damage display.
+**Scope.** `MobEnterField`/`MobLeaveField`/`MobMove`/`MobChangeController`/`MobDamaged`
+decode → `MobLook` sprite render (Mob.wz animation states, HP bar, hit flash,
+death). `DamageNumber` floating combat text, `DropSprite`, `OtherCharLook`.
+`UserMeleeAttack(47)` outgoing via `MeleeAttackEncoder` (front-of-player hit
+box, ≤6 targets, client-chosen damage that the v95 server trusts), a transient
+`Stance.Swing` pose, and an attack cooldown.
 
-**Exit criteria.** Player can kill a low-level mob, see damage numbers, and
-have the mob respawn.
+**Exit criteria.** Player can swing at a low-level mob, the server echoes
+`MobDamaged` → a red damage number appears + the mob's HP bar drops, enough
+hits kill it, and the server respawns a fresh one. No disconnect (correct
+`fieldKey`).
+
+**Deferred to later phases:** server-accurate damage formula (needs weapon +
+stat data — Phase 6/7); outbound `MobMove(227)` for controlled mobs (needs a
+mob-side physics sim + HackedCode synthesis); `UserShootAttack(48)` /
+`UserMagicAttack(49)` (need the skill system — Phase 7).
 
 ## Phase 5 — NPCs & dialog
 

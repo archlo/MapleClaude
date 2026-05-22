@@ -14,7 +14,7 @@ MapleClaude is a brand-new client written in C# 13 / .NET 10 with MonoGame for r
 | 2 | Field load, player avatar render, no input | shipped |
 | 3 | Movement, camera follow, `UserMove(44)` outgoing | shipped |
 | 3.5 | Cosmetic in-game UI (StatusBar, Inventory, SkillBook, MiniMap, KeyConfig, etc.) — UI only, no server data yet | shipped |
-| 4 | Mobs: `MobEnterField` / `MobMove` / `MobChangeController` decode, mob sprites, melee damage display | planned |
+| 4 | Mobs: `MobEnterField` / `MobMove` / `MobChangeController` decode, mob sprites + animation + HP bar, `UserMeleeAttack(47)` outgoing, damage numbers, kill + respawn | shipped |
 | 5 | NPCs: `NpcEnterField` / click-to-talk / `ScriptMessage` decoder (say/ask/menu/quiz) | planned |
 | 6 | Inventory wire-up: drive the StatusBar's `ItemInventory` / `EquipInventory` panels from real `InventoryOperation` packets, equip swap with stat updates | planned |
 | 7 | Skills + buffs: drive the `SkillBook` panel from `ChangeSkillRecordResult`, send `UserSkillUseRequest`, decode `TemporaryStatSet`/`Reset` for the `BuffList` HUD | planned |
@@ -36,6 +36,7 @@ See `docs/roadmap.md` for the detailed roadmap and `CLAUDE.md` for the contribut
 | ESC | Quit |
 | Arrow keys | Walk / turn in-game (configurable via the in-game `KeyConfig` panel) |
 | Alt / Space / W | Jump in-game (configurable via `KeyConfig`) |
+| Attack key (configurable via `KeyConfig`) | Melee swing — hits mobs in range, sends `UserMeleeAttack(47)` |
 | Ctrl+A / Ctrl+C / Ctrl+V / Ctrl+X | Select all / copy / paste / cut in text input fields (login ID, character name) |
 | Right Alt | Toggle Korean IME Hangul ↔ English mode when Korean is the active Windows input language |
 
@@ -52,6 +53,8 @@ See `docs/roadmap.md` for the detailed roadmap and `CLAUDE.md` for the contribut
 | `MigrateIn(20)` | C→S | `src/MapleClaude.Net/Session/MigrationCoordinator.cs` |
 | `SetField(141)` | S→C | `src/MapleClaude.Net/Handlers/FieldHandlers.cs` |
 | `UserMove(44)` | C→S | `src/MapleClaude/Stages/FieldStage.cs` + `src/MapleClaude.Net/Packet/MovePathEncoder.cs` |
+| `UserMeleeAttack(47)` | C→S | `src/MapleClaude/Stages/GameStage.cs` + `src/MapleClaude.Net/Packet/MeleeAttackEncoder.cs` |
+| `MobEnterField(284)` / `MobLeaveField(285)` / `MobMove(287)` / `MobChangeController(286)` / `MobDamaged(294)` | S→C | `src/MapleClaude.Net/Handlers/FieldHandlers.cs` → `src/MapleClaude/Character/MobLook.cs` |
 | `AliveReq(17)` / `AliveAck(25)` | S↔C | auto-replied in both `LoginHandlers` and `FieldHandlers` |
 
 All Maple wire strings are length-prefixed LE-short + US-ASCII (not UTF-16LE). All multi-byte primitives are little-endian.

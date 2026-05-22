@@ -204,26 +204,37 @@ public sealed class FieldHandlers
 
     private void HandleMobEnter(InPacket p)
     {
+        // Mirrors upstream MobPacket.mobEnterField:
+        //   int mobId, byte calcDamageIndex, int templateId,
+        //   MobStat.encodeTemporary(...), Mob.encode(...)
         var mobId      = p.ReadInt();
         var calcDmgIdx = p.ReadByte();
         var templateId = p.ReadInt();
-        // Skip TemporaryStatSet (complex — read until we know position)
-        // Kinoko encodes: long flag (all zeros initially) so 8 bytes of zero = skip 8
+        _ = calcDmgIdx;
         try
         {
-            p.ReadLong();   // nTemporaryStat flag (zeroes for fresh spawns)
-            p.ReadByte();   // bIsBoss
-            p.ReadByte();   // bDead
-            p.ReadByte();   // bShowHpBar
-            p.ReadInt();    // nEffectItemID
-            p.ReadByte();   // nTeamForMCPQ
-            var x        = p.ReadShort();
-            var y        = p.ReadShort();
-            var action   = p.ReadByte();
-            var foothold = p.ReadShort();
-            p.ReadShort();  // fh from
-            p.ReadByte();   // bLeft
-            p.ReadInt();    // tEffectDelay
+            // MobStat.encodeTemporary for a fresh (un-buffed) mob writes only the
+            // temporary-stat BitFlag: MobTemporaryStat.FLAG_SIZE = 128 bits = 4
+            // ints = 16 bytes, all zero. A buffed mob would append per-stat option
+            // blocks after the flag — NOT handled here; those would shift the
+            // position read. Acceptable for Phase 4 (fresh field spawns); revisit
+            // when mob buffs land.
+            p.Skip(16);     // temporary-stat flag (4 ints, zero for fresh spawn)
+
+            // Mob.encode (CMob::Init):
+            var x          = p.ReadShort();   // ptPosPrev.x
+            var y          = p.ReadShort();   // ptPosPrev.y
+            p.ReadByte();                     // nMoveAction
+            var foothold   = p.ReadShort();   // current foothold
+            p.ReadShort();                    // start foothold
+            var summonType = p.ReadSByte();   // nAppearType
+            if (summonType == -3 /* REVIVED */ || summonType >= 0)
+            {
+                p.ReadInt();                  // dwOption
+            }
+            p.ReadByte();                     // nTeamForMCarnival
+            p.ReadInt();                      // nEffectItemID
+            p.ReadInt();                      // nPhase
             OnMobEnter?.Invoke(new MobEnterArgs
             {
                 MobId = mobId, TemplateId = templateId,

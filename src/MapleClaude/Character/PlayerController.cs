@@ -43,10 +43,17 @@ public sealed class PlayerController
     // ── Input edge-detect ─────────────────────────────────────────────────────
     private bool _prevJump;
 
+    // ── Transient swing pose (set by TriggerAttack, decays each tick) ──────────
+    private float _swingTimer;
+    private const float SwingDuration = 0.4f;
+
     public Vector2 Position   { get; set; }
     public Stance  Stance     { get; private set; } = Stance.Stand1;
     public int     Frame      { get; private set; }
     public bool    FacingLeft { get; private set; }
+
+    /// <summary>Force the player into the swing pose for <see cref="SwingDuration"/> seconds.</summary>
+    public void TriggerAttack() => _swingTimer = SwingDuration;
 
     public PlayerController(FieldScene field)
     {
@@ -117,10 +124,18 @@ public sealed class PlayerController
             });
         }
 
-        // Update stance
-        Stance = !_grounded          ? Stance.Jump
-               : MathF.Abs(_velocity.X) > 1f ? Stance.Walk1
-               : Stance.Stand1;
+        // Update stance — a live swing pose overrides the movement-derived one.
+        if (_swingTimer > 0f)
+        {
+            _swingTimer -= dt;
+            Stance = Stance.Swing;
+        }
+        else
+        {
+            Stance = !_grounded          ? Stance.Jump
+                   : MathF.Abs(_velocity.X) > 1f ? Stance.Walk1
+                   : Stance.Stand1;
+        }
 
         _animTimer += dt;
         if (_animTimer >= 0.18f) { _animTimer -= 0.18f; Frame = (Frame + 1) % 4; }
