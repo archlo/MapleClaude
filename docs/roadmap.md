@@ -72,14 +72,24 @@ stat data — Phase 6/7); outbound `MobMove(227)` for controlled mobs (needs a
 mob-side physics sim + HackedCode synthesis); `UserShootAttack(48)` /
 `UserMagicAttack(49)` (need the skill system — Phase 7).
 
-## Phase 5 — NPCs & dialog
+## Phase 5 — NPCs & dialog (shipped)
 
-**Scope.** `NpcEnterField`, click-to-talk, `ScriptMessage` decoder for
-all dialog kinds (say/ask/menu/quiz/get-text/get-number/yes-no/icon).
-Dialog UI widget.
+**Scope.** `NpcEnterField`/`NpcLeaveField` render (`NpcLook`), click-to-talk +
+the Interact key (`UserSelectNpc(63)` with player position), a wire-correct
+`ScriptMessage(363)` decoder matching upstream `ScriptMessage.encode`
+(SAY with prev/next, ASKYESNO, ASKMENU with `#L#`/`#l` item parsing, ASKTEXT,
+ASKNUMBER), the `NpcTalk` dialog widget, and `UserScriptMessageAnswer(65)`
+replies that echo the active dialog's `ScriptMessageType` (the canonical enum
+in `src/MapleClaude.Net/Packet/ScriptMessageType.cs`).
 
-**Exit criteria.** Click an NPC; talk through a multi-message script with
-choices; trigger a server-side script effect.
+**Exit criteria.** Click (or Interact-key) an NPC → its dialog renders the
+real text → advance through a multi-line say, pick a menu item, answer a
+yes/no, text, or number prompt → the server's script engine advances and
+effects fire. No disconnect.
+
+**Deferred:** `SAYIMAGE`, `ASKAVATAR`, `ASKSLIDEMENU` rich dialogs (rare);
+`ASKQUIZ`/`ASKSPEEDQUIZ` (unsupported by the v95 server); NPC shops
+(`OpenShopDlg`/`ShopResult`/`UserShopRequest`) → Phase 6.
 
 ## Phase 6 — Inventory & items
 

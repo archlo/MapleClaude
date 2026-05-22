@@ -481,44 +481,71 @@ public sealed class FieldHandlers
     }
 
     // ── NPC Script ────────────────────────────────────────────────────────────
-    // ScriptMessage: byte speakerType, int speakerId, byte msgType, bool prev, bool next, string text
-    // Then extra fields by msgType (0=Say,4=AskYesNo, 2=AskMenu, etc.)
+    // Mirrors upstream ScriptMessage.encode (kinoko/script/common/ScriptMessage.java):
+    //   byte speakerType, int speakerId, byte msgType, byte messageParam,
+    //   then a per-type body. For SAY the prev/next bytes come AFTER the text;
+    //   ASK* types have no prev/next.
+
+    private const int ScriptParamSpeakerOnRight = 0x4; // ScriptMessageParam.SPEAKER_ON_RIGHT
 
     private void HandleScriptMessage(InPacket p)
     {
-        var speakerType = p.ReadByte();
-        var speakerId   = p.ReadInt();
-        var msgType     = p.ReadByte();
-        var prev        = p.ReadBool();
-        var next        = p.ReadBool();
-        var text        = p.ReadString();
+        p.ReadByte();                                   // nSpeakerTypeID (unused)
+        var speakerId    = p.ReadInt();
+        var msgType      = ScriptMessageTypeExtensions.FromValue(p.ReadByte());
+        var messageParam = p.ReadByte();                // bParam
         var args = new ScriptMessageArgs
         {
-            SpeakerId = speakerId,
-            MsgType   = msgType,
-            Text      = text,
-            HasPrev   = prev,
-            HasNext   = next,
+            SpeakerId    = speakerId,
+            MsgType      = msgType,
+            MessageParam = messageParam,
         };
         try
         {
             switch (msgType)
             {
-                case 3: // ASK_QUIZ
-                    args.QuizHint       = p.ReadString();
-                    args.QuizMinLength  = p.ReadShort();
-                    args.QuizMaxLength  = p.ReadShort();
-                    args.QuizRemainTime = p.ReadInt();
+                case ScriptMessageType.Say:
+                    if ((messageParam & ScriptParamSpeakerOnRight) != 0)
+                    {
+                        p.ReadInt();                    // nSpeakerTemplateID (repeated)
+                    }
+                    args.Text    = p.ReadString();
+                    args.HasPrev = p.ReadBool();
+                    args.HasNext = p.ReadBool();
                     break;
-                case 5: // ASK_TEXT
+
+                case ScriptMessageType.AskYesNo:
+                case ScriptMessageType.AskAccept:
+                case ScriptMessageType.AskMenu:
+                    args.Text = p.ReadString();
+                    break;
+
+                case ScriptMessageType.AskText:
+                    args.Text        = p.ReadString();
                     args.DefaultText = p.ReadString();
                     args.MinLength   = p.ReadShort();
                     args.MaxLength   = p.ReadShort();
                     break;
-                case 6: // ASK_NUMBER
+
+                case ScriptMessageType.AskBoxText:
+                    args.Text        = p.ReadString();
+                    args.DefaultText = p.ReadString();
+                    args.MinLength   = p.ReadShort();   // columns
+                    args.MaxLength   = p.ReadShort();   // lines
+                    break;
+
+                case ScriptMessageType.AskNumber:
+                    args.Text       = p.ReadString();
                     args.DefaultNum = p.ReadInt();
                     args.MinNum     = p.ReadInt();
                     args.MaxNum     = p.ReadInt();
+                    break;
+
+                default:
+                    // SAYIMAGE / ASKAVATAR / ASKSLIDEMENU etc. — rare in low-level
+                    // content; decode the leading text best-effort so the dialog
+                    // still shows something.
+                    args.Text = p.ReadString();
                     break;
             }
         }
@@ -648,18 +675,17 @@ public sealed class UserChatArgs   { public int CharId; public string Text = str
 
 public sealed class ScriptMessageArgs
 {
-    public int    SpeakerId;
-    public byte   MsgType;
-    public string Text        = string.Empty;
+    public int                SpeakerId;
+    public ScriptMessageType  MsgType;
+    public byte               MessageParam;
+    public string             Text        = string.Empty;
+    // SAY (0)
     public bool   HasPrev, HasNext;
-    // ASK_TEXT (5)
+    // ASKTEXT (3) / ASKBOXTEXT (14)
     public string DefaultText = string.Empty;
     public int    MinLength, MaxLength;
-    // ASK_NUMBER (6)
+    // ASKNUMBER (4)
     public int    DefaultNum, MinNum, MaxNum;
-    // ASK_QUIZ (3)
-    public string QuizHint      = string.Empty;
-    public int    QuizMinLength, QuizMaxLength, QuizRemainTime;
 }
 
 public sealed class FuncKeyEntry   { public int KeyIndex, ActionId; public byte Type; }

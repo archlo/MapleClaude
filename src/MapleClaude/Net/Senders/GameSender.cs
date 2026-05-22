@@ -40,92 +40,56 @@ public static class GameSender
         return p;
     }
 
-    public static OutPacket UserSelectNpc(int npcObjId)
+    // UserSelectNpc(63): int objectId, short userX, short userY
+    // (upstream UserHandler.handleUserSelectNpc reads the player's position).
+    public static OutPacket UserSelectNpc(int npcObjId, short userX, short userY)
     {
         var p = OutPacket.Of(InHeader.UserSelectNpc);
         p.WriteInt(npcObjId);
-        p.WriteShort(0);   // padding
+        p.WriteShort(userX);
+        p.WriteShort(userY);
         return p;
     }
 
-    // SAY (0) / any type: action 0 = proceed / next
-    public static OutPacket ScriptAnswerNext(byte msgType)
+    // UserScriptMessageAnswer(65). The echoed msgType MUST equal the type the
+    // server last sent (UserHandler.handleUserScriptMessageAnswer looks it up).
+    //
+    // SAY / SAYIMAGE / ASKYESNO / ASKACCEPT: just byte action.
+    //   action -1 = prev, 0 = no/end/dismiss, 1 = yes/next.
+    public static OutPacket ScriptAnswerSay(ScriptMessageType type, sbyte action)
     {
         var p = OutPacket.Of(InHeader.UserScriptMessageAnswer);
-        p.WriteByte(msgType);
-        p.WriteByte(0);
+        p.WriteByte((byte)type);
+        p.WriteByte((byte)action);
         return p;
     }
 
-    // ASK_YESNO (4)
-    public static OutPacket ScriptAnswerYesNo(bool yes)
+    // ASKMENU / ASKNUMBER / ASKSLIDEMENU: byte action, then (if action==1) int answer.
+    //   For ASKMENU the int is the selection index; for ASKNUMBER it's the value.
+    public static OutPacket ScriptAnswerNumber(ScriptMessageType type, int answer)
     {
         var p = OutPacket.Of(InHeader.UserScriptMessageAnswer);
-        p.WriteByte(4);
-        p.WriteByte((byte)(yes ? 1 : 0));
-        return p;
-    }
-
-    // ASK_MENU (2): action 1 + int choice index
-    public static OutPacket ScriptAnswerMenu(int choice)
-    {
-        var p = OutPacket.Of(InHeader.UserScriptMessageAnswer);
-        p.WriteByte(2);
+        p.WriteByte((byte)type);
         p.WriteByte(1);
-        p.WriteInt(choice);
+        p.WriteInt(answer);
         return p;
     }
 
-    // ASK_TEXT (5): action 1 + string
-    public static OutPacket ScriptAnswerText(string text)
+    // ASKTEXT / ASKBOXTEXT: byte action, then (if action==1) string answer.
+    public static OutPacket ScriptAnswerText(ScriptMessageType type, string answer)
     {
         var p = OutPacket.Of(InHeader.UserScriptMessageAnswer);
-        p.WriteByte(5);
-        p.WriteByte(1);
-        p.WriteString(text);
-        return p;
-    }
-
-    public static OutPacket ScriptAnswerTextCancel()
-    {
-        var p = OutPacket.Of(InHeader.UserScriptMessageAnswer);
-        p.WriteByte(5);
-        p.WriteByte(0);
-        return p;
-    }
-
-    // ASK_NUMBER (6): action 1 + int
-    public static OutPacket ScriptAnswerNumber(int number)
-    {
-        var p = OutPacket.Of(InHeader.UserScriptMessageAnswer);
-        p.WriteByte(6);
-        p.WriteByte(1);
-        p.WriteInt(number);
-        return p;
-    }
-
-    public static OutPacket ScriptAnswerNumberCancel()
-    {
-        var p = OutPacket.Of(InHeader.UserScriptMessageAnswer);
-        p.WriteByte(6);
-        p.WriteByte(0);
-        return p;
-    }
-
-    // ASK_QUIZ (3): action 1 + string answer
-    public static OutPacket ScriptAnswerQuiz(string answer)
-    {
-        var p = OutPacket.Of(InHeader.UserScriptMessageAnswer);
-        p.WriteByte(3);
+        p.WriteByte((byte)type);
         p.WriteByte(1);
         p.WriteString(answer);
         return p;
     }
 
-    public static OutPacket ScriptAnswerQuizCancel()
+    // Cancel / dismiss a prompt (action 0) for any ASK* type.
+    public static OutPacket ScriptAnswerCancel(ScriptMessageType type)
     {
         var p = OutPacket.Of(InHeader.UserScriptMessageAnswer);
-        p.WriteByte(3);
+        p.WriteByte((byte)type);
         p.WriteByte(0);
         return p;
     }

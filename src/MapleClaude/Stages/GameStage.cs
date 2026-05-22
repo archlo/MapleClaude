@@ -105,6 +105,9 @@ public sealed class GameStage : Stage
     // outgoing path; see comment block in Update.
     private bool _loggedMobMoveTodo;
 
+    // Active NPC-dialog message type — answers must echo the type the server sent.
+    private ScriptMessageType _dialogMsgType;
+
     // Melee attack pacing.
     private float _attackCooldown;
     private const float AttackCooldownSeconds = 0.6f;
@@ -456,87 +459,46 @@ public sealed class GameStage : Stage
         fh.OnScriptMessage += args =>
         {
             if (_npcTalk is null) return;
-            // Load NPC portrait for the speaker
             _npcTalk.LoadPortrait(_npcWz, args.SpeakerId);
-            var msgType = args.MsgType;
-            switch (msgType)
+            // The answer we send back must echo the type the server sent.
+            var type = args.MsgType;
+            _dialogMsgType = type;
+            switch (type)
             {
-                case 3: // ASK_QUIZ
-                    _npcTalk.ShowQuiz(args.Text, args.QuizHint, args.QuizMinLength, args.QuizMaxLength, args.QuizRemainTime);
-                    _npcTalk.OnTextConfirm = answer =>
-                    {
-                        if (Game.Session.IsConnected)
-                            Game.Session.Send(GameSender.ScriptAnswerQuiz(answer));
-                    };
-                    _npcTalk.OnNo = () =>
-                    {
-                        if (Game.Session.IsConnected)
-                            Game.Session.Send(GameSender.ScriptAnswerQuizCancel());
-                    };
-                    break;
-                case 2: // ASK_MENU
+                case ScriptMessageType.AskMenu:
                     var choices = ParseMenuChoices(args.Text);
                     _npcTalk.ShowMenu(args.Text, choices);
-                    _npcTalk.OnMenuChoice = choice =>
-                    {
-                        if (Game.Session.IsConnected)
-                            Game.Session.Send(GameSender.ScriptAnswerMenu(choice));
-                    };
+                    _npcTalk.OnMenuChoice = choice => SendIfConnected(GameSender.ScriptAnswerNumber(type, choice));
                     break;
-                case 4: // ASK_YESNO
+
+                case ScriptMessageType.AskYesNo:
+                case ScriptMessageType.AskAccept:
                     _npcTalk.Show(args.Text, NpcTalk.DialogType.YesNo);
-                    _npcTalk.OnYes = () =>
-                    {
-                        if (Game.Session.IsConnected)
-                            Game.Session.Send(GameSender.ScriptAnswerYesNo(true));
-                    };
-                    _npcTalk.OnNo = () =>
-                    {
-                        if (Game.Session.IsConnected)
-                            Game.Session.Send(GameSender.ScriptAnswerYesNo(false));
-                    };
+                    _npcTalk.OnYes = () => SendIfConnected(GameSender.ScriptAnswerSay(type, 1));
+                    _npcTalk.OnNo  = () => SendIfConnected(GameSender.ScriptAnswerSay(type, 0));
                     break;
-                case 5: // ASK_TEXT
+
+                case ScriptMessageType.AskText:
+                case ScriptMessageType.AskBoxText:
                     _npcTalk.ShowAskText(args.Text, args.DefaultText, args.MinLength, args.MaxLength);
-                    _npcTalk.OnTextConfirm = text =>
-                    {
-                        if (Game.Session.IsConnected)
-                            Game.Session.Send(GameSender.ScriptAnswerText(text));
-                    };
-                    _npcTalk.OnNo = () =>
-                    {
-                        if (Game.Session.IsConnected)
-                            Game.Session.Send(GameSender.ScriptAnswerTextCancel());
-                    };
+                    _npcTalk.OnTextConfirm = text => SendIfConnected(GameSender.ScriptAnswerText(type, text));
+                    _npcTalk.OnNo          = ()   => SendIfConnected(GameSender.ScriptAnswerCancel(type));
                     break;
-                case 6: // ASK_NUMBER
+
+                case ScriptMessageType.AskNumber:
                     _npcTalk.ShowAskNumber(args.Text, args.DefaultNum, args.MinNum, args.MaxNum);
-                    _npcTalk.OnNumberConfirm = num =>
-                    {
-                        if (Game.Session.IsConnected)
-                            Game.Session.Send(GameSender.ScriptAnswerNumber(num));
-                    };
-                    _npcTalk.OnNo = () =>
-                    {
-                        if (Game.Session.IsConnected)
-                            Game.Session.Send(GameSender.ScriptAnswerNumberCancel());
-                    };
+                    _npcTalk.OnNumberConfirm = num => SendIfConnected(GameSender.ScriptAnswerNumber(type, num));
+                    _npcTalk.OnNo            = ()  => SendIfConnected(GameSender.ScriptAnswerCancel(type));
                     break;
-                default: // SAY (0), any unknown type
+
+                default: // SAY (0) and rare types — a plain message with prev/next.
                     _npcTalk.Show(args.Text,
                         args.HasPrev && args.HasNext ? NpcTalk.DialogType.PrevNext
                       : args.HasNext                ? NpcTalk.DialogType.Next
                       : NpcTalk.DialogType.Ok);
-                    _npcTalk.OnOk = _npcTalk.OnNext = () =>
-                    {
-                        if (Game.Session.IsConnected)
-                            Game.Session.Send(GameSender.ScriptAnswerNext(msgType));
-                    };
-                    _npcTalk.OnPrev = () =>
-                    {
-                        if (Game.Session.IsConnected)
-                            Game.Session.Send(GameSender.ScriptAnswerNext(msgType));
-                    };
+                    // SAY action: 1 = next/ok, -1 = prev, 0 = end.
+                    _npcTalk.OnOk = _npcTalk.OnNext = () => SendIfConnected(GameSender.ScriptAnswerSay(type, 1));
+                    _npcTalk.OnPrev = () => SendIfConnected(GameSender.ScriptAnswerSay(type, -1));
                     break;
             }
         };
@@ -843,11 +805,57 @@ public sealed class GameStage : Stage
                 var sp = _camera.WorldToScreen(npc.Position);
                 if (npc.GetScreenBounds(sp).Contains(x, y))
                 {
-                    if (Game.Session.IsConnected)
-                        Game.Session.Send(GameSender.UserSelectNpc(npc.ObjId));
+                    SelectNpc(npc);
                     break;
                 }
             }
+        }
+    }
+
+    /// <summary>Send UserSelectNpc with the player's current position (the
+    /// server reads it). Shared by click-to-talk and the Interact key.</summary>
+    private void SelectNpc(NpcLook npc)
+    {
+        if (!Game.Session.IsConnected)
+        {
+            return;
+        }
+        var pos = _physics?.Position ?? _player?.Position ?? Vector2.Zero;
+        Game.Session.Send(GameSender.UserSelectNpc(npc.ObjId, (short)pos.X, (short)pos.Y));
+    }
+
+    private const float NpcInteractRange = 80f;
+
+    /// <summary>Interact key: talk to the closest NPC within range.</summary>
+    private void TalkToNearestNpc()
+    {
+        if (_npcTalk?.IsVisible == true || _npcs.Count == 0)
+        {
+            return;
+        }
+        var pos = _physics?.Position ?? _player?.Position ?? Vector2.Zero;
+        NpcLook? nearest = null;
+        var best = NpcInteractRange;
+        foreach (var npc in _npcs)
+        {
+            var d = Vector2.Distance(npc.Position, pos);
+            if (d < best)
+            {
+                best = d;
+                nearest = npc;
+            }
+        }
+        if (nearest is not null)
+        {
+            SelectNpc(nearest);
+        }
+    }
+
+    private void SendIfConnected(OutPacket p)
+    {
+        if (Game.Session.IsConnected)
+        {
+            Game.Session.Send(p);
         }
     }
 
@@ -920,7 +928,7 @@ public sealed class GameStage : Stage
                 }
                 break;
             case KeyConfig.KeyAction.Interact:
-                // NPC interact — find nearest NPC
+                TalkToNearestNpc();
                 break;
             case KeyConfig.KeyAction.None:
             case KeyConfig.KeyAction.MoveLeft:
