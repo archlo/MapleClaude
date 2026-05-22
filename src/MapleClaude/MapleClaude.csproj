@@ -190,6 +190,7 @@
 
   <ItemGroup>
     <ProjectReference Include="..\MapleClaude.Domain\MapleClaude.Domain.csproj" />
+    <ProjectReference Include="..\MapleClaude.Localization\MapleClaude.Localization.csproj" />
     <ProjectReference Include="..\MapleClaude.Net\MapleClaude.Net.csproj" />
     <ProjectReference Include="..\MapleClaude.Wz\MapleClaude.Wz.csproj" />
     <ProjectReference Include="..\MapleClaude.Render\MapleClaude.Render.csproj" />

@@ -1,6 +1,7 @@
 <Solution>
   <Folder Name="/src/">
     <Project Path="src/MapleClaude.Domain/MapleClaude.Domain.csproj" />
+    <Project Path="src/MapleClaude.Localization/MapleClaude.Localization.csproj" />
     <Project Path="src/MapleClaude.Net/MapleClaude.Net.csproj" />
     <Project Path="src/MapleClaude.Render/MapleClaude.Render.csproj" />
     <Project Path="src/MapleClaude.Wz/MapleClaude.Wz.csproj" />

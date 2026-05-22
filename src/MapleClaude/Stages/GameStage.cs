@@ -5,6 +5,7 @@ using MapleClaude.Net;
 using MapleClaude.Net.Handlers;
 using MapleClaude.Net.Packet;
 using MapleClaude.Net.Senders;
+using MapleClaude.Localization;
 using MapleClaude.Map;
 using MapleClaude.Render;
 using MapleClaude.Settings;
@@ -856,11 +857,12 @@ public sealed class GameStage : Stage
 
     // DropPickUp warning subtypes (kinoko MessagePacket.DropPickUpMessageType):
     //   -3 CANNOT_ACQUIRE_ANY_ITEMS, -2 UNAVAILABLE_FOR_PICK_UP, -1 CANNOT_GET_ANYMORE_ITEMS.
-    private static string LootWarningText(sbyte warning) => warning switch
+    // -1/-3 have clean StringPool matches; -2 has no clean pool id (kept inline).
+    private string LootWarningText(sbyte warning) => warning switch
     {
-        -1 => "Your inventory is full.",
+        -1 => Game.StringPool.Get(StringId.DropCannotGetAnymoreItems),
         -2 => "This item cannot be picked up.",
-        -3 => "You cannot acquire this item.",
+        -3 => Game.StringPool.Get(StringId.DropCannotAcquireItems),
         _  => "Unable to pick up.",
     };
 
@@ -1413,7 +1415,12 @@ public sealed class GameStage : Stage
         }
     }
 
-    private static string JobName(int jobId) => jobId switch
+    // Prefer the StringPool job name; fall back to the built-in table for jobs
+    // not yet mapped to a pool id (no regression).
+    private string JobName(int jobId) =>
+        StringId.JobNameId.TryGetValue(jobId, out var sp) ? Game.StringPool.Get(sp) : JobNameFallback(jobId);
+
+    private static string JobNameFallback(int jobId) => jobId switch
     {
         0   => "Beginner",
         100 => "Swordman",  110 => "Fighter",  111 => "Crusader",  112 => "Hero",

@@ -2,6 +2,7 @@ using MapleClaude.App;
 using MapleClaude.Debug;
 using MapleClaude.Net.Handlers;
 using MapleClaude.Net.Session;
+using MapleClaude.Localization;
 using MapleClaude.Platform;
 using MapleClaude.Render;
 using MapleClaude.Settings;
@@ -72,6 +73,10 @@ public sealed class MapleClaudeGame : Game
     /// <summary>Persisted user preferences (keybinds + volumes) at
     /// <c>%APPDATA%/MapleClaude/settings.json</c>.</summary>
     public SettingsStore Settings { get; }
+
+    /// <summary>Bundled UI/system string table (the v95 client StringPool), used
+    /// for job names, system messages, and UI labels.</summary>
+    public StringPool StringPool { get; }
     public WzPackage? UiWz => _uiWz;
     public WzPackage? MapWz => _mapWz;
     public WzPackage? SoundWz => _soundWz;
@@ -129,6 +134,7 @@ public sealed class MapleClaudeGame : Game
         _wzDir = ResolveWzDir(config);
         AudioPlayer = new WzAudioPlayer(loggerFactory.CreateLogger<WzAudioPlayer>());
         Settings = new SettingsStore(loggerFactory.CreateLogger<SettingsStore>());
+        StringPool = new StringPool(loggerFactory.CreateLogger<StringPool>(), Settings.Load().Language);
         DebugRegistry = debugRegistry;
         Session = session;
         LoginHandlers = loginHandlers;

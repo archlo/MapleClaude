@@ -16,4 +16,8 @@ public sealed class UserSettings
     public Dictionary<string, string> KeyBindings { get; set; } = new();
     public int BgmVolume { get; set; } = 80;
     public int SfxVolume { get; set; } = 100;
+
+    /// <summary>UI language code; selects the <c>strings.&lt;lang&gt;.csv</c> pack
+    /// (defaults to English, which is always bundled).</summary>
+    public string Language { get; set; } = "en";
 }

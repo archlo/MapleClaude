@@ -16,6 +16,7 @@
   </ItemGroup>
 
   <ItemGroup>
+    <ProjectReference Include="..\..\src\MapleClaude.Localization\MapleClaude.Localization.csproj" />
     <ProjectReference Include="..\..\src\MapleClaude.Net\MapleClaude.Net.csproj" />
   </ItemGroup>
 
