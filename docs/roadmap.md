@@ -197,6 +197,141 @@ byte-correct requests (unit-tested) and reuse the migration template.
 (Map-change / channel-reconnect / cash-shop-content runtime behaviour is
 server-dependent, verified against a live server.)
 
+## Phase 11 — StringPool language pack (shipped)
+
+**Scope.** A new `MapleClaude.Localization` library bundles the v95 client's
+internal string table (6883 entries) as an embedded English language pack
+(`strings.en.csv`, extensible to other languages). `StringPool` loads/parses it
+(`""` and `\r\n` escapes) and exposes `Get` / `GetOr` / `TryGet` / `Format`
+(printf `%d`/`%s` substitution), surfaced as `Game.StringPool`. `StringId` names
+the ids used today. `GameStage.JobName` and `LootWarningText` now read from the
+pack (job names fall back to the built-in table for unmapped jobs).
+
+**Exit criteria.** Job names and loot warnings render from the pack; the pack
+ships embedded in the single-file exe; parser/format/mapping are unit-tested.
+
+---
+
+# Maturation roadmap (Phases 12–21)
+
+These phases mature the client toward a complete play experience. Each is an
+independent contributor-ready unit — pick one, branch `phase-N/<slug>`, ship a PR
+to `master` with the standard sections. Order is a suggestion, not a hard
+dependency (12 unblocks the most downstream polish, so it's a good first pick).
+
+## Phase 12 — Display names (String.wz)
+
+**Scope.** Read `String.wz` (`Eqp.img`/`Ins.img`/`Etc.img`/`Cash.img`,
+`Skill.img`, `Map.img`, `Mob.img`, `Npc.img`) for real names + descriptions
+through a cached `NameService` keyed by id. Wire into `ItemInventory`/
+`EquipInventory`, `SkillBook`, loot popups, `CharSelect` map name, and NPC/mob
+name tags — replacing the `"Item {id}"` / `"Skill {id}"` placeholders.
+
+**Exit criteria.** Items, skills, maps, and mobs show their real names from
+String.wz. **Key files:** new `src/MapleClaude/.../NameService.cs`,
+`GameStage.ItemDisplayName`/`ApplySkills`, the inventory/skill panels.
+
+## Phase 13 — Map rendering completeness
+
+**Scope.** Tile layers 0–7 (per-layer `tile` + `Tile.wz` tilesets), object layers
+1–7 with correct cross-layer z-order, multi-frame animation for backgrounds +
+objects (`ani`/`a0`/`a1`/delays), and parallax (`rx`/`ry` factors and
+`HMove`/`VMove` scroll types). Follow-ups: ladders/ropes visuals, reactors,
+weather, seats.
+
+**Exit criteria.** A real town/field map renders with tiles, layered objects,
+animation, and parallax matching the v95 client. **Key files:**
+`src/MapleClaude/Map/{FieldScene,MapScene,TileInfo,BackInfo}.cs`.
+
+## Phase 14 — Character / avatar fidelity
+
+**Scope.** Replace the fixed equip draw order in `CharacterRenderer` with the real
+Character.wz **zmap/vslot** z-ordering; a full animation state machine
+(walk/jump/alert/attack/sit/prone/ladder/rope) for the player **and** other
+players; render hair equips, weapon stickers, pets, and the cash overlay
+(`UnseenEquip`); show a real avatar in **CharSelect**; **consolidate** the
+duplicate `CharCreationStage` / `CharCreateStage` to the renderer-backed one.
+
+**Exit criteria.** Avatars layer correctly and animate per stance everywhere.
+**Key files:** `src/MapleClaude/Character/{CharacterRenderer,CharLook,OtherCharLook}.cs`,
+`Stages/{CharSelectStage,CharCreateStage}.cs`.
+
+## Phase 15 — Skills & buffs depth
+
+**Scope.** `Skill.wz`: icons, max level, active/passive split, MP cost, cooldown
+timers + UI, and per-skill cast animation/effect (`UserEffectLocal`/`Remote`).
+Full `TemporaryStatSet(31)` per-stat decode (the `CharacterTemporaryStat` enum +
+LOCAL_ENCODE_ORDER) driving a real `BuffList` instead of the optimistic
+placeholder.
+
+**Exit criteria.** The skill book shows real icons/levels; casting plays the
+skill effect and respects cooldown/MP; buffs show real durations.
+**Key files:** `UI/Game/{SkillBook,BuffList}.cs`, `Net/Handlers/FieldHandlers.cs`.
+
+## Phase 16 — Keybinds & quickslots
+
+**Scope.** `KeyAction` entries for skills/items/macros; bind a skill or item to a
+key (extend `ApplyServerKeymap` for `type` 1/2/3/8); a working quickslot bar wired
+to the bindings; drag-to-bind from `SkillBook`/`ItemInventory`; a
+duplicate-binding warning.
+
+**Exit criteria.** A skill/item dragged to a key fires on press; the quickslot bar
+reflects bindings; layout persists (Phase 10 store). **Key files:**
+`UI/Game/{KeyConfig,QuickSlots,SkillBook,ItemInventory}.cs`.
+
+## Phase 17 — In-game presentation (resolution + HUD)
+
+**Scope.** On character-select → map entry, switch the window from the 800×600
+login resolution to the in-game resolution and load the player's map at that size;
+restore on return to login (reuse `MapleClaudeGame.ResizeWindow`, as
+`CashShopStage` already does). Mature the `StatusBar` HUD (HP/MP/EXP gauges, level,
+job, quickslots, menu buttons) to the real v95 layout/assets, and reflow every HUD
+panel to the active resolution.
+
+**Exit criteria.** Entering a map enlarges the view and the HUD renders correctly
+at the new resolution; logging out restores the login size. **Key files:**
+`MapleClaudeGame.ResizeWindow`, `Stages/GameStage.cs`, `UI/Game/StatusBar.cs`.
+
+## Phase 18 — Login polish
+
+**Scope.** A real PIN stage (`CheckPinCode`/`UpdatePinCode`); wire the currently
+no-op buttons (Find ID/PW, Join, Homepage, `BtStart`/`BtVAC`); the CharSelect
+delete flow (`DeleteCharacter`).
+
+**Exit criteria.** PIN entry works against a PIN-enabled server; the login/world
+buttons perform their actions; characters can be deleted. **Key files:**
+`Stages/{PinStage,LoginStage,WorldSelectStage,CharSelectStage}.cs`.
+
+## Phase 19 — NPC shops & storage
+
+**Scope.** NPC shops (`OpenShopDlg`/`ShopResult` decode, `UserShopRequest`
+buy/sell/recharge) driving the `Shop` panel; player storage / trunk
+(`TrunkResult`/`TrunkRequest`).
+
+**Exit criteria.** Buy/sell at an NPC shop updates inventory + meso; storage
+deposits/withdraws. **Key files:** `UI/Game/Shop.cs`, `Net/Handlers/FieldHandlers.cs`,
+`Net/Senders/GameSender.cs`.
+
+## Phase 20 — Quests
+
+**Scope.** `QuestRecord` from `CharacterData` + live `Message` quest-record
+updates; quest start/complete (`UserQuestRequest`); the `QuestLog` driven by real
+data; quest availability markers on NPCs.
+
+**Exit criteria.** Accept a quest, see it in the log, complete it, and receive the
+reward. **Key files:** `UI/Game/QuestLog.cs`, `Net/Handlers/FieldHandlers.cs`.
+
+## Phase 21 — Guild, messenger & combat depth
+
+**Scope.** Guild (`GuildResult`/`GuildRequest`) + the guild tab in `UserList`; the
+messenger window. Combat depth: outbound `MobMove(227)` for client-controlled
+mobs (a mob-side physics sim) and a server-accurate damage formula (now that
+weapon + stat data exist).
+
+**Exit criteria.** A guild loads + displays; controlled mobs move for other
+players; melee damage matches the server. **Key files:**
+`UI/Game/UserList.cs`, `Character/MobLook.cs`, `Net/{Handlers,Senders}/*`.
+
 ## Conventions across phases
 
 - **Branch per phase**, commit per logical unit (file compiles, test passes,

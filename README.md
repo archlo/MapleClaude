@@ -21,6 +21,17 @@ MapleClaude is a brand-new client written in C# 13 / .NET 10 with MonoGame for r
 | 8 | Social: map chat + party/buddy/guild chat (`GroupMessage`) + whisper in `ChatBar`; party (`PartyResult`/`PartyRequest`, invite→`/accept`) + friends (`FriendResult`/`FriendRequest`) in `UserList`; chat commands (`/w` `/p` `/invite` `/accept` `/leave`) | shipped |
 | 9 | Loot: `Message(38)` decode (`IncEXP` / `IncMoney` / `DropPickUp`) → EXP / meso / item popups via `StatusMessenger`; `StatChanged(30)` HUD-total fix; `DropPickUpRequest(246)` pickup | shipped |
 | 10 | Polish: settings + keybind persistence (`%APPDATA%/MapleClaude/settings.json`), map BGM + volume, portal travel (`UserTransferFieldRequest`), channel transfer (`UserTransferChannelRequest` + `MigrateCommand`), Cash Shop migrate (`UserMigrateToCashShopRequest`). AOT stays disabled (MonoGame reflection) — ships as single self-contained `.exe` | shipped |
+| 11 | StringPool: bundled English language pack (`MapleClaude.Localization`), `Game.StringPool` lookup/format service, job names + loot warnings sourced from the pack | shipped |
+| 12 | Display names (String.wz): item/skill/map/mob/npc names + descriptions via a cached `NameService`; wired into inventory, skill book, loot popups, name tags | planned |
+| 13 | Map rendering completeness: tile layers 0–7, object layers 1–7 with cross-layer z-order, multi-frame back/obj animation, parallax (`rx`/`ry`, `HMove`/`VMove`); ladders/ropes, reactors, weather | planned |
+| 14 | Character/avatar fidelity: real Character.wz zmap/vslot z-order, full animation state machine (walk/jump/attack/sit/prone/climb) for self + others, hair/pet/weapon-sticker/cash overlays, CharSelect avatar, consolidate the two char-create stages | planned |
+| 15 | Skills & buffs depth: Skill.wz icons/max-level/active-passive/MP cost, cooldown timers + UI, per-skill cast animation/effect, full `TemporaryStatSet(31)` buff decode | planned |
+| 16 | Keybinds & quickslots: bind skills/items to keys (`KeyAction` for skill/item/macro), working quickslot bar, drag-to-bind from SkillBook/Inventory, duplicate-binding warning | planned |
+| 17 | In-game presentation: switch to the in-game resolution on map entry (restore on logout), mature the `StatusBar`/HUD to real v95 layout + assets, reflow all panels to the active resolution | planned |
+| 18 | Login polish: real PIN stage (`CheckPinCode`/`UpdatePinCode`), wire the no-op buttons (Find ID/PW, Join, Homepage, BtStart/BtVAC), CharSelect delete flow | planned |
+| 19 | NPC shops & storage: `OpenShopDlg`/`ShopResult`/`UserShopRequest` buy/sell, the `Shop` panel, and storage/trunk (`TrunkResult`/`TrunkRequest`) | planned |
+| 20 | Quests: quest start/complete (`UserQuestRequest`), `QuestRecord` from `CharacterData` + live updates, the `QuestLog` driven by real data, quest NPC/markers | planned |
+| 21 | Guild, messenger & combat depth: `GuildResult`/`GuildRequest` + guild tab, the messenger window; outbound `MobMove(227)` for controlled mobs and a server-accurate damage formula | planned |
 
 The cosmetic UI panels added in Phase 3.5 (StatusBar gauges, MiniMap, ItemInventory grid, SkillBook tabs, etc.) currently render with placeholder/demo data; Phases 4–10 progressively wire each one to live server packets without redrawing them.
 
