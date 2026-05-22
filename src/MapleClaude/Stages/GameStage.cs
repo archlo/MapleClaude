@@ -249,11 +249,6 @@ public sealed class GameStage : Stage
         _panels.Add(_channelSelect);
         _panels.Add(_messenger);
 
-        // Demo messenger messages
-        _messenger.ShowLoot("Blue Snail Shell");
-        _messenger.ShowEXP(12);
-        _messenger.ShowBuff("Magic Guard");
-
         // ── Network packet handler ────────────────────────────────────────────
         _netHandler = new GamePacketHandler(_loggerFactory.CreateLogger<GamePacketHandler>());
 
@@ -345,6 +340,20 @@ public sealed class GameStage : Stage
             if ((a.Mask & 0x10)  != 0 && a.Level > 0) { if (_stats != null) _stats.Level = a.Level; if (_statusBar != null) _statusBar.Level = a.Level; }
             if ((a.Mask & 0x4000)!= 0) { if (_stats != null) _stats.AP = a.Ap; }
             if ((a.Mask & 0x8000)!= 0) { if (_stats != null && _skill != null) _skill.SP = a.Sp; }
+        };
+
+        // ── Loot / EXP / meso popups (Message 38) ─────────────────────────────
+        // EXP gain and meso pickup float over the player via the StatusMessenger.
+        // Item loot popups arrive via OnInventoryOperation (which carries the full
+        // item slot with its name), so OnLootMessage only surfaces meso + warnings.
+        fh.OnIncExp     += exp   => _messenger?.ShowEXP(exp);
+        fh.OnIncMoney   += money => _messenger?.ShowLoot($"+{money:N0} mesos");
+        fh.OnLootMessage += a =>
+        {
+            if (a.Warning < 0)
+                _messenger?.Show(LootWarningText(a.Warning), StatusMessenger.MsgColor.Orange);
+            else if (a.IsMoney)
+                _messenger?.ShowLoot($"+{a.Money:N0} mesos");
         };
 
         fh.OnMobEnter += args =>
@@ -734,6 +743,16 @@ public sealed class GameStage : Stage
 
     private static string ItemDisplayName(InventoryItem it) =>
         string.IsNullOrEmpty(it.Title) ? $"Item {it.ItemId:D7}" : it.Title;
+
+    // DropPickUp warning subtypes (kinoko MessagePacket.DropPickUpMessageType):
+    //   -3 CANNOT_ACQUIRE_ANY_ITEMS, -2 UNAVAILABLE_FOR_PICK_UP, -1 CANNOT_GET_ANYMORE_ITEMS.
+    private static string LootWarningText(sbyte warning) => warning switch
+    {
+        -1 => "Your inventory is full.",
+        -2 => "This item cannot be picked up.",
+        -3 => "You cannot acquire this item.",
+        _  => "Unable to pick up.",
+    };
 
     private ItemInventory.InvItem ToInvItem(InventoryItem it, int tab, int slot) => new()
     {
@@ -1385,17 +1404,8 @@ public sealed class GameStage : Stage
         }
         if (nearest is null) return;
 
-        // Wire shape: byte fieldKey, int tickCount, short x, short y,
-        // int dwDropID, int dwCliCrc. Per upstream
-        // kinoko/handler/field/FieldHandler.handleDropPickUpRequest.
-        var p = OutPacket.Of(InHeader.DropPickUpRequest);
-        p.WriteByte(_fieldKey);     // bFieldKey — server compares to user.getFieldKey()
-        p.WriteInt(0);              // update_time / tickCount
-        p.WriteShort((short)playerPos.X);
-        p.WriteShort((short)playerPos.Y);
-        p.WriteInt(nearest.DropId);
-        p.WriteInt(0);              // dwCliCrc — server reads but does not validate
-        Game.Session.Send(p);
+        Game.Session.Send(GameSender.PickUpDrop(
+            _fieldKey, (short)playerPos.X, (short)playerPos.Y, nearest.DropId));
     }
 
     private void SpawnNpc(int id, Vector2 worldPos, string name)

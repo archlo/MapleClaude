@@ -40,6 +40,14 @@ public sealed class FieldHandlers
     public event Action<DropEnterArgs>?         OnDropEnter;
     public event Action<DropLeaveArgs>?         OnDropLeave;
 
+    // ── Loot / EXP / meso popups (Message 38) ──────────────────────────────────
+    /// <summary>EXP gained (IncEXP message) — the raw exp delta.</summary>
+    public event Action<int>?                   OnIncExp;
+    /// <summary>Meso gained from a quest / script reward (IncMoney message).</summary>
+    public event Action<int>?                   OnIncMoney;
+    /// <summary>A drop pick-up message (meso, item bundle, or a warning).</summary>
+    public event Action<LootMessageArgs>?       OnLootMessage;
+
     // ── Inventory ─────────────────────────────────────────────────────────────
     public event Action<List<InventoryOpArg>>?  OnInventoryOperation;
 
@@ -103,6 +111,9 @@ public sealed class FieldHandlers
         OnUserMove            = null;
         OnDropEnter           = null;
         OnDropLeave           = null;
+        OnIncExp              = null;
+        OnIncMoney            = null;
+        OnLootMessage         = null;
         OnInventoryOperation  = null;
         OnUserChat            = null;
         OnGroupMessage        = null;
@@ -135,6 +146,7 @@ public sealed class FieldHandlers
         router.Register(OutHeader.UserMove,            (p, s) => HandleUserMove(p));
         router.Register(OutHeader.DropEnterField,      (p, s) => HandleDropEnter(p));
         router.Register(OutHeader.DropLeaveField,      (p, s) => HandleDropLeave(p));
+        router.Register(OutHeader.Message,             (p, s) => HandleMessage(p));
         router.Register(OutHeader.InventoryOperation,  (p, s) => HandleInventoryOp(p));
         router.Register(OutHeader.UserChat,            (p, s) => HandleUserChat(p));
         router.Register(OutHeader.GroupMessage,        (p, s) => HandleGroupMessage(p));
@@ -325,35 +337,94 @@ public sealed class FieldHandlers
     }
 
     // ── StatChanged ───────────────────────────────────────────────────────────
-    // Kinoko: WvsContext.statChanged — bool exclRequest + long flag + per-stat fields
-
+    // Kinoko: WvsContext.statChanged — byte bExclRequestSent, int dwCharStat (4-byte
+    // mask, NOT long), then per-stat fields in Stat.ENCODE_ORDER, trailing two bytes.
+    // Stat bits (kinoko/world/user/stat/Stat.java):
+    //   SKIN=0x1 FACE=0x2 HAIR=0x4 PETSN=0x8 LEVEL=0x10 JOB=0x20 STR=0x40 DEX=0x80
+    //   INT=0x100 LUK=0x200 HP=0x400 MHP=0x800 MP=0x1000 MMP=0x2000 AP=0x4000
+    //   SP=0x8000 EXP=0x10000 POP=0x20000 MONEY=0x40000 PETSN2=0x80000
+    //   PETSN3=0x100000 TEMPEXP=0x200000
+    // Widths: SKIN/LEVEL=byte; JOB/STR/DEX/INT/LUK/AP/SP/POP=short;
+    //   FACE/HAIR/HP/MHP/MP/MMP/EXP/MONEY/TEMPEXP=int; PETSN/2/3=long.
+    // SP is read as a short — extend-SP jobs (Evan, etc.) encode a map instead, but
+    // those packets carry no EXP/MONEY for us so an isolated parse error is harmless
+    // (the router catches it; the canonical HUD snapshot also decodes independently).
     private void HandleStatChanged(InPacket p)
     {
-        p.ReadByte();   // exclRequest
-        var mask = p.ReadLong();
+        p.ReadByte();             // bExclRequestSent
+        var mask = p.ReadInt();   // dwCharStat
         var args = new StatChangedArgs { Mask = mask };
 
-        if ((mask & 0x01)   != 0) args.Skin    = p.ReadByte();
-        if ((mask & 0x02)   != 0) args.Face    = p.ReadInt();
-        if ((mask & 0x04)   != 0) args.Hair    = p.ReadInt();
-        if ((mask & 0x10)   != 0) args.Level   = p.ReadByte();
-        if ((mask & 0x20)   != 0) args.Job     = p.ReadShort();
-        if ((mask & 0x40)   != 0) args.Str     = p.ReadShort();
-        if ((mask & 0x80)   != 0) args.Dex     = p.ReadShort();
-        if ((mask & 0x100)  != 0) args.Int     = p.ReadShort();
-        if ((mask & 0x200)  != 0) args.Luk     = p.ReadShort();
-        if ((mask & 0x400)  != 0) args.Hp      = p.ReadInt();
-        if ((mask & 0x800)  != 0) args.MaxHp   = p.ReadInt();
-        if ((mask & 0x1000) != 0) args.Mp      = p.ReadInt();
-        if ((mask & 0x2000) != 0) args.MaxMp   = p.ReadInt();
-        if ((mask & 0x4000) != 0) args.Ap      = p.ReadShort();
-        if ((mask & 0x8000) != 0) args.Sp      = p.ReadShort();
-        if ((mask & 0x10000)!= 0) args.Exp     = p.ReadInt();
-        if ((mask & 0x20000)!= 0) args.Pop     = p.ReadShort();
-        if ((mask & 0x200000)!=0) args.Meso    = p.ReadInt();
+        if ((mask & 0x1)     != 0) args.Skin  = p.ReadByte();
+        if ((mask & 0x2)     != 0) args.Face  = p.ReadInt();
+        if ((mask & 0x4)     != 0) args.Hair  = p.ReadInt();
+        if ((mask & 0x8)     != 0) p.ReadLong();                  // PETSN
+        if ((mask & 0x10)    != 0) args.Level = p.ReadByte();
+        if ((mask & 0x20)    != 0) args.Job   = p.ReadShort();
+        if ((mask & 0x40)    != 0) args.Str   = p.ReadShort();
+        if ((mask & 0x80)    != 0) args.Dex   = p.ReadShort();
+        if ((mask & 0x100)   != 0) args.Int   = p.ReadShort();
+        if ((mask & 0x200)   != 0) args.Luk   = p.ReadShort();
+        if ((mask & 0x400)   != 0) args.Hp    = p.ReadInt();
+        if ((mask & 0x800)   != 0) args.MaxHp = p.ReadInt();
+        if ((mask & 0x1000)  != 0) args.Mp    = p.ReadInt();
+        if ((mask & 0x2000)  != 0) args.MaxMp = p.ReadInt();
+        if ((mask & 0x4000)  != 0) args.Ap    = p.ReadShort();
+        if ((mask & 0x8000)  != 0) args.Sp    = p.ReadShort();
+        if ((mask & 0x10000) != 0) args.Exp   = p.ReadInt();
+        if ((mask & 0x20000) != 0) args.Pop   = p.ReadShort();
+        if ((mask & 0x40000) != 0) args.Meso  = p.ReadInt();      // MONEY
+        if ((mask & 0x80000) != 0) p.ReadLong();                  // PETSN2
+        if ((mask & 0x100000)!= 0) p.ReadLong();                  // PETSN3
+        if ((mask & 0x200000)!= 0) p.ReadInt();                   // TEMPEXP
 
-        p.ReadByte();   // bExclRequest trailing
         OnStatChanged?.Invoke(args);
+    }
+
+    // ── Message (loot / EXP / meso popups) ──────────────────────────────────────
+    // kinoko/packet/world/MessagePacket — byte MessageType, then a per-type tail.
+    //   IncEXP(3):    byte white, int exp, … (only exp is needed)
+    //   IncMoney(6):  int money
+    //   DropPickUp(0): sbyte subtype —
+    //     ITEM_BUNDLE(0)/ITEM_SINGLE(2): int itemId, int quantity
+    //     MONEY(1):                      byte portionNotFound, int money, short cafeBonus
+    //     <0 (warning):                  no body
+    // Other message types (QuestRecord, System, …) are surfaced elsewhere.
+    private void HandleMessage(InPacket p)
+    {
+        var msgType = p.ReadByte();
+        switch (msgType)
+        {
+            case 3:                                   // IncEXP
+                p.ReadByte();                         // white
+                OnIncExp?.Invoke(p.ReadInt());
+                break;
+            case 6:                                   // IncMoney
+                OnIncMoney?.Invoke(p.ReadInt());
+                break;
+            case 0:                                   // DropPickUp
+            {
+                var subtype = p.ReadSByte();
+                var args = new LootMessageArgs { Warning = subtype };
+                switch (subtype)
+                {
+                    case 0:                           // ITEM_BUNDLE
+                    case 2:                           // ITEM_SINGLE
+                        args.ItemId   = p.ReadInt();
+                        args.Quantity = p.ReadInt();
+                        break;
+                    case 1:                           // MONEY
+                        args.IsMoney = true;
+                        p.ReadByte();                 // portionNotFound
+                        args.Money = p.ReadInt();
+                        p.ReadShort();                // internet-cafe meso bonus
+                        break;
+                    // subtype < 0: a warning (inventory full, etc.) — no body.
+                }
+                OnLootMessage?.Invoke(args);
+                break;
+            }
+        }
     }
 
     // ── Mobs ─────────────────────────────────────────────────────────────────
@@ -1044,6 +1115,17 @@ public sealed class DropEnterArgs
 }
 
 public sealed class DropLeaveArgs { public int DropId; public byte LeaveType; }
+
+public sealed class LootMessageArgs
+{
+    public bool  IsMoney;
+    public int   ItemId;
+    public int   Quantity;
+    public int   Money;
+    /// <summary>The DropPickUp subtype byte; &lt; 0 means a warning
+    /// (e.g. inventory full) carried no item/meso body.</summary>
+    public sbyte Warning;
+}
 
 public sealed class InventoryOpArg
 {

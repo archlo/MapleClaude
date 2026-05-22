@@ -54,6 +54,21 @@ public static class GameSender
         return p;
     }
 
+    // DropPickUpRequest(246): byte fieldKey, int update_time, short x, short y,
+    // int dropId, int dwCliCrc. Per kinoko/handler/field/FieldHandler.handleDropPickUpRequest
+    // (the server compares fieldKey to user.getFieldKey(); dwCliCrc is read but not validated).
+    public static OutPacket PickUpDrop(byte fieldKey, short x, short y, int dropId)
+    {
+        var p = OutPacket.Of(InHeader.DropPickUpRequest);
+        p.WriteByte(fieldKey);
+        p.WriteInt(0);                       // update_time / tickCount
+        p.WriteShort(x);
+        p.WriteShort(y);
+        p.WriteInt(dropId);
+        p.WriteInt(0);                       // dwCliCrc
+        return p;
+    }
+
     // ── Skills ──────────────────────────────────────────────────────────────────
 
     // UserSkillUpRequest(102): int update_time, int skillId.
