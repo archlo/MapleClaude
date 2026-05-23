@@ -4,9 +4,11 @@ namespace MapleClaude.Net.Senders;
 
 /// <summary>
 /// Outgoing login-server requests. Builders mirror upstream Kinoko handler
-/// readers (<c>kinoko/handler/stage/LoginHandler.java</c>) byte-for-byte.
-/// Stage code constructs an <see cref="OutPacket"/> via these helpers and
-/// hands it to <c>ClientSession.Send</c>.
+/// readers (<c>kinoko/handler/stage/LoginHandler.java</c>) byte-for-byte. Stage
+/// code constructs an <see cref="OutPacket"/> via these helpers and hands it to
+/// <c>ClientSession.Send</c>. Lives in <c>MapleClaude.Net</c> (not the exe) so
+/// the wire shapes are unit testable; consumers reference it via the
+/// <c>MapleClaude.Net.Senders</c> namespace exactly as before.
 /// </summary>
 public static class LoginSender
 {
@@ -54,6 +56,20 @@ public static class LoginSender
         p.WriteInt(shoes);
         p.WriteInt(weapon);
         p.WriteByte((byte)(male ? 0 : 1));
+        return p;
+    }
+
+    /// <summary>
+    /// DeleteCharacter (<see cref="InHeader.DeleteCharacter"/>, opcode 24).
+    /// Wire: <c>string secondaryPassword, int characterId</c>. Kinoko validates
+    /// the account's secondary password before deleting (it returns IncorrectSPW
+    /// otherwise), so the caller prompts for it.
+    /// </summary>
+    public static OutPacket DeleteCharacter(int characterId, string secondaryPassword)
+    {
+        var p = OutPacket.Of(InHeader.DeleteCharacter);
+        p.WriteString(secondaryPassword);
+        p.WriteInt(characterId);
         return p;
     }
 

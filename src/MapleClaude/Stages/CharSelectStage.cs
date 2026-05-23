@@ -3,6 +3,7 @@ using MapleClaude.Debug;
 using MapleClaude.Map;
 using MapleClaude.Net.Handlers;
 using MapleClaude.Net.Packet;
+using MapleClaude.Net.Senders;
 using MapleClaude.Net.Session;
 using MapleClaude.Render;
 using MapleClaude.UI;
@@ -72,6 +73,7 @@ public sealed class CharSelectStage : Stage
 
     // Overlays
     private LoginNoticeOverlay? _notice;
+    private DeleteConfirmOverlay? _deleteConfirm;
 
     // State
     private int _selectedSlot = -1;
@@ -196,6 +198,14 @@ public sealed class CharSelectStage : Stage
         if (_btDelete != null) _btDelete.Enabled = false;
 
         _notice = new LoginNoticeOverlay(_loader, _ui, Game.Font, new Vector2(400, 300));
+        _deleteConfirm = new DeleteConfirmOverlay(_loader, _ui, Game.Font, new Vector2(400, 300))
+        {
+            OnConfirm = (charId, spw) =>
+            {
+                _logger.LogInformation("CharSelect: BtDelete confirm — charId={Cid}", charId);
+                Game.Session.Send(LoginSender.DeleteCharacter(charId, spw));
+            },
+        };
 
         ApplyLayout();
         RegisterDebugItems();
@@ -247,11 +257,33 @@ public sealed class CharSelectStage : Stage
 
     private void OnDeleteCharacterResult(DeleteCharacterArgs args)
     {
-        _notice?.Show(args.Success
-            ? $"Character {args.CharacterId} deleted."
-            : $"Delete failed (code {args.ResultCode}).",
-            LoginNoticeOverlay.NoticeType.Ok);
+        if (args.Success)
+        {
+            // The handler already removed it from Game.Session.Characters; drop
+            // it from the display list too and clear the selection.
+            _chars.RemoveAll(c => c.Id == args.CharacterId);
+            _selectedSlot = -1;
+            if (_btSelect != null) _btSelect.Enabled = false;
+            if (_btDelete != null) _btDelete.Enabled = false;
+            _notice?.Show("Character deleted.", LoginNoticeOverlay.NoticeType.Ok);
+        }
+        else
+        {
+            _notice?.Show(DeleteFailMessage(args.ResultCode), LoginNoticeOverlay.NoticeType.Ok);
+        }
     }
+
+    // LoginResultType codes the server returns for a failed delete (mirrors
+    // upstream Kinoko handleDeleteCharacter / LoginResultType).
+    private static string DeleteFailMessage(byte code) => code switch
+    {
+        20 => "Incorrect 2nd password.",                       // IncorrectSPW
+        6  => "Could not delete the character (server error).", // DBFail
+        22 => "A guild master's character cannot be deleted.",  // ...OnGuildMaster
+        24 => "An engaged character cannot be deleted.",        // ...Engaged
+        29 => "A character in a family cannot be deleted.",     // ...OnFamily
+        _  => $"Could not delete the character (code {code}).",
+    };
 
     public override void Update(GameTime gameTime)
     {
@@ -266,6 +298,7 @@ public sealed class CharSelectStage : Stage
 
         ApplyLayout();
         _notice?.Update(gameTime);
+        _deleteConfirm?.Update(gameTime);
     }
 
     public override void Draw(GameTime gameTime, SpriteBatch sb)
@@ -291,6 +324,7 @@ public sealed class CharSelectStage : Stage
             b.Draw(sb);
 
         _notice?.Draw(sb, Game.WhitePixel);
+        _deleteConfirm?.Draw(sb, Game.WhitePixel);
     }
 
     private void DrawSlots(SpriteBatch sb)
@@ -344,6 +378,12 @@ public sealed class CharSelectStage : Stage
     {
         if (button != MouseButton.Left) return;
 
+        if (_deleteConfirm?.IsVisible == true)
+        {
+            _deleteConfirm.HandleMouseButton(x, y, down);
+            return;
+        }
+
         if (_notice?.IsVisible == true)
         {
             _notice.HandleMouseButton(x, y, down);
@@ -377,6 +417,7 @@ public sealed class CharSelectStage : Stage
 
     public override void OnKeyPress(Keys key)
     {
+        if (_deleteConfirm?.IsVisible == true) { _deleteConfirm.OnKeyPress(key); return; }
         if (_notice?.OnKeyPress(key) == true) return;
 
         switch (key)
@@ -394,6 +435,11 @@ public sealed class CharSelectStage : Stage
                 if (_selectedSlot < SlotCount - 1) SelectSlot(_selectedSlot + 1);
                 break;
         }
+    }
+
+    public override void OnTextInput(char character)
+    {
+        if (_deleteConfirm?.IsVisible == true) _deleteConfirm.OnTextInput(character);
     }
 
     private void SelectSlot(int index)
@@ -437,7 +483,14 @@ public sealed class CharSelectStage : Stage
     private void OnDeleteClicked()
     {
         if (_selectedSlot < 0) return;
-        _notice?.Show("No character to delete.", LoginNoticeOverlay.NoticeType.Ok);
+        var characters = Game.Session.Characters;
+        if (_selectedSlot >= characters.Count)
+        {
+            _notice?.Show("That slot has no character yet.", LoginNoticeOverlay.NoticeType.Ok);
+            return;
+        }
+        var entry = characters[_selectedSlot];
+        _deleteConfirm?.Show(entry.Stat.Name, entry.Stat.CharacterId);
     }
 
     private void OnPageL()

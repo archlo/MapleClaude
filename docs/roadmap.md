@@ -304,15 +304,31 @@ on-screen at the larger resolution; per-panel re-centring is a follow-up. The
 v95 `StatusBar3.img` artwork is centred rather than stretched/tiled to the full
 width (a later artwork pass).
 
-## Phase 18 — Login polish
+## Phase 18 — Login polish (shipped)
 
-**Scope.** A real PIN stage (`CheckPinCode`/`UpdatePinCode`); wire the currently
-no-op buttons (Find ID/PW, Join, Homepage, `BtStart`/`BtVAC`); the CharSelect
-delete flow (`DeleteCharacter`).
+**Scope.** The CharSelect **delete flow** is now live: `BtDelete` opens a new
+`DeleteConfirmOverlay` that prompts for the account's secondary password (Kinoko
+validates it server-side and returns `IncorrectSPW` otherwise), then sends
+`LoginSender.DeleteCharacter(charId, spw)` (`string secondaryPassword, int
+characterId`). The existing `DeleteCharacterResult(15)` handler drops the
+character from the session; `CharSelectStage` now also refreshes its display list
+and maps the failure codes (IncorrectSPW / DBFail / guild-master / engaged /
+family) to readable messages. `LoginSender` moved from the exe into
+`MapleClaude.Net` (it has no exe dependencies) so its wire shapes are unit
+tested. The previously silent login buttons (Find ID/PW, Join, Homepage) now show
+a notice explaining they aren't applicable to a Kinoko server (accounts
+auto-register on first login).
 
-**Exit criteria.** PIN entry works against a PIN-enabled server; the login/world
-buttons perform their actions; characters can be deleted. **Key files:**
-`Stages/{PinStage,LoginStage,WorldSelectStage,CharSelectStage}.cs`.
+**Exit criteria.** A character can be deleted end-to-end (confirm → packet →
+result → list refresh); the info buttons give feedback. **Key files:**
+`Stages/{LoginStage,CharSelectStage}.cs`, `UI/DeleteConfirmOverlay.cs`,
+`MapleClaude.Net/Senders/LoginSender.cs`.
+
+**Deferred:** the **PIN stage** stays dormant — upstream Kinoko always sends
+`bSkipPinCode = true` in `CheckPasswordResult` and implements no
+`CheckPinCode`/`UpdatePinCode` handler, so a real PIN flow can't be exercised
+against it. `WorldSelectStage`'s `BtStart`/`BtVAC`/`BtViewChoice` are
+v95-client-only view toggles with no server packet and remain no-ops.
 
 ## Phase 19 — NPC shops & storage
 

@@ -159,10 +159,18 @@ public sealed class LoginStage : Stage
                 _saveCheck.IsChecked = !_saveCheck.IsChecked;
             }
         });
-        _btLoginIdLost = MakeButton("BtLoginIDLost", lostIdPos, () => _logger.LogInformation("Find loginID clicked"));
-        _btPasswdLost = MakeButton("BtPasswdLost", lostPwPos, () => _logger.LogInformation("Find P/W clicked"));
-        _btNew = MakeButton("BtNew", newPos, () => _logger.LogInformation("Join clicked"));
-        _btHomePage = MakeButton("BtHomePage", homePos, () => _logger.LogInformation("Website clicked"));
+        // These open Nexon web flows on the original client; against a Kinoko
+        // server there is no such site, so they give the user clear feedback
+        // instead of silently doing nothing. Account creation is server-side
+        // (Kinoko auto-registers an unknown ID/PW on first login).
+        _btLoginIdLost = MakeButton("BtLoginIDLost", lostIdPos,
+            () => _notice?.Show("ID recovery isn't available on this server.", LoginNoticeOverlay.NoticeType.Ok));
+        _btPasswdLost = MakeButton("BtPasswdLost", lostPwPos,
+            () => _notice?.Show("Password recovery isn't available on this server.", LoginNoticeOverlay.NoticeType.Ok));
+        _btNew = MakeButton("BtNew", newPos,
+            () => _notice?.Show("New accounts are created automatically on first login.", LoginNoticeOverlay.NoticeType.Ok));
+        _btHomePage = MakeButton("BtHomePage", homePos,
+            () => _notice?.Show("No homepage is configured for this server.", LoginNoticeOverlay.NoticeType.Ok));
         _btQuit = MakeButton("BtQuit", quitPos, () => _quitConfirm!.IsVisible = true);
 
         _saveCheck = new Checkbox
