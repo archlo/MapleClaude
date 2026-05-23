@@ -52,11 +52,13 @@ public sealed class CharacterRenderer
         }
         var stanceKey = stance.ToWzKey();
         var skin = look.Skin;
-        // Body: Character/0000200<skin>.img/<stance>/<frame>/body
+        // Body / arm / hand: Character/0000200<skin>.img/<stance>/<frame>/<part>
         var bodyId = 2000 + skin;
         var body = ResolveCharacter($"0000{bodyId}.img/{stanceKey}/{frame}/body");
-        // Head: Character/00012000.img/<stance>/<frame>/head
-        var head = ResolveCharacter($"00012000.img/{stanceKey}/{frame}/head");
+        var arm  = ResolveCharacter($"0000{bodyId}.img/{stanceKey}/{frame}/arm");
+        var hand = ResolveCharacter($"0000{bodyId}.img/{stanceKey}/{frame}/hand");
+        // Head: Character/00012<skin:D3>.img/<stance>/<frame>/head
+        var head = ResolveCharacter($"00012{skin:D3}.img/{stanceKey}/{frame}/head");
         // Face: Character/Face/<face>.img/<expression=default>/0/face
         var face = ResolveFace(look.Face);
         // Hair sprites: split between hair, hairBelowBody, hairOverHead.
@@ -103,22 +105,28 @@ public sealed class CharacterRenderer
 
         _ = stat;
         var color = Color.White;
+        var flip = facingLeft ? SpriteEffects.FlipHorizontally : SpriteEffects.None;
 
-        // Render: roughly back-to-front. Head/body anchors are origins on the sprite
-        // (the WZ-supplied origin), so each .Draw subtracts origin from foot pos.
-        cape?.Draw(sb, footPos, color);
-        body?.Draw(sb, footPos, color);
-        hairBelow?.Draw(sb, footPos, color);
-        head?.Draw(sb, footPos, color);
-        face?.Draw(sb, footPos, color);
-        pants?.Draw(sb, footPos, color);
-        shoes?.Draw(sb, footPos, color);
-        top?.Draw(sb, footPos, color);
-        gloves?.Draw(sb, footPos, color);
-        hair?.Draw(sb, footPos, color);
-        cap?.Draw(sb, footPos, color);
-        hairOver?.Draw(sb, footPos, color);
-        weapon?.Draw(sb, footPos, color);
+        // Render roughly back-to-front. Each part's WZ origin anchors it relative
+        // to the foot position. (Pixel-precise navel/neck/brow anchor-map alignment
+        // is a follow-up; this origin-based order matches the character-create
+        // preview.) Order: hair-below → cape → body → lower equips → arm/sleeve →
+        // gloves → head → face → hair → cap → hand → weapon.
+        hairBelow?.Draw(sb, footPos, flip, color);
+        cape?.Draw(sb, footPos, flip, color);
+        body?.Draw(sb, footPos, flip, color);
+        pants?.Draw(sb, footPos, flip, color);
+        shoes?.Draw(sb, footPos, flip, color);
+        top?.Draw(sb, footPos, flip, color);
+        arm?.Draw(sb, footPos, flip, color);
+        gloves?.Draw(sb, footPos, flip, color);
+        head?.Draw(sb, footPos, flip, color);
+        face?.Draw(sb, footPos, flip, color);
+        hair?.Draw(sb, footPos, flip, color);
+        cap?.Draw(sb, footPos, flip, color);
+        hairOver?.Draw(sb, footPos, flip, color);
+        hand?.Draw(sb, footPos, flip, color);
+        weapon?.Draw(sb, footPos, flip, color);
     }
 
     private WzSprite? ResolveCharacter(string path)

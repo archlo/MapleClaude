@@ -24,7 +24,7 @@ public sealed class OtherCharLook
     public Vector2   Position { get; set; }
     private bool     _facingLeft;
 
-    private readonly CharLook? _sprites;
+    private CharLook? _sprites;
     private readonly BuiltInFont? _font;
 
     private const int PlaceholderW = 30;
@@ -39,16 +39,19 @@ public sealed class OtherCharLook
         Look     = look;
         Position = position;
         _font    = font;
-
-        // Build a CharLook using the skin from the avatar look
-        if (look != null)
-            _sprites = new CharLook(null!, look.Skin); // loader injected separately
     }
 
-    public void LoadSprites(WzTextureLoader loader, WzPackage? charWz)
+    /// <summary>Build the avatar from Character.wz. With a <paramref name="renderer"/>
+    /// and a decoded <see cref="Look"/>, the full avatar (hair/face/equips) is drawn.</summary>
+    public void LoadSprites(WzTextureLoader loader, WzPackage? charWz, CharacterRenderer? renderer)
     {
-        if (_sprites is null || charWz is null) return;
+        if (charWz is null) return;
+        _sprites = new CharLook(loader, Look?.Skin ?? 0);
         _sprites.Load(charWz);
+        if (renderer is not null && Look is not null)
+        {
+            _sprites.SetAvatar(renderer, Look);
+        }
     }
 
     public void SetPosition(short x, short y) => Position = new Vector2(x, y);
@@ -57,8 +60,9 @@ public sealed class OtherCharLook
 
     public void Update(float dt)
     {
-        // Remote players don't run physics — position from server
-        // Drive animation state based on recent move events (simplified)
+        // Remote players don't run physics; drive an idle stand animation and
+        // keep the facing the last move packet set.
+        _sprites?.UpdateFromPhysics(dt, Stance.Stand1, _facingLeft);
     }
 
     public void Draw(SpriteBatch sb, Texture2D white, Vector2 screenPos)

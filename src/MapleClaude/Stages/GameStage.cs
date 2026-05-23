@@ -44,6 +44,7 @@ public sealed class GameStage : Stage
     // World
     private GameCamera _camera = null!;
     private CharLook? _player;
+    private CharacterRenderer? _charRenderer;
     private readonly List<NpcLook> _npcs = new();
 
     // Mobs
@@ -165,6 +166,11 @@ public sealed class GameStage : Stage
             MapBounds = new Rectangle(-3000, -2000, 6000, 4000),
             FollowSpeed = 5f,
         };
+
+        // Full-avatar renderer (body + equips + hair + face), shared by the player
+        // and other players. The real look/skin arrive via SetField / UserEnterField.
+        _charRenderer = new CharacterRenderer(
+            _loggerFactory.CreateLogger<CharacterRenderer>(), _charWz, Game.ItemWz, _loader);
 
         // Player character — spawn at map origin
         _player = new CharLook(_loader, skinId: 0) { Position = Vector2.Zero };
@@ -455,7 +461,7 @@ public sealed class GameStage : Stage
             if (_otherChars.ContainsKey(args.CharId)) return;
             var other = new OtherCharLook(args.CharId, args.Name, args.Level, args.Look,
                                           new Vector2(args.X, args.Y), Game.Font);
-            other.LoadSprites(_loader!, _charWz);
+            other.LoadSprites(_loader!, _charWz, _charRenderer);
             _otherChars[args.CharId] = other;
         };
 
@@ -651,6 +657,10 @@ public sealed class GameStage : Stage
             return;
         }
         Game.CharacterId = args.Stat.CharacterId;
+        if (args.Look is not null && _player is not null && _charRenderer is not null)
+        {
+            _player.SetAvatar(_charRenderer, args.Look);
+        }
         try
         {
             // A SetField (re)initializes the field — drop every entity from the
@@ -978,17 +988,7 @@ public sealed class GameStage : Stage
             if (_player != null)
             {
                 _player.Position = _physics.Position;
-                var charLookStance = _physics.Stance switch
-                {
-                    Stance.Jump   => CharLook.Stance.Jump,
-                    Stance.Walk1  => CharLook.Stance.Walk1,
-                    Stance.Walk2  => CharLook.Stance.Walk1,
-                    // CharLook has no swing frames; Alert is the closest
-                    // "weapon-ready" pose so the player visibly reacts.
-                    Stance.Swing  => CharLook.Stance.Alert,
-                    _             => CharLook.Stance.Stand1,
-                };
-                _player.UpdateFromPhysics(dt, charLookStance, _physics.FacingLeft);
+                _player.UpdateFromPhysics(dt, _physics.Stance, _physics.FacingLeft);
             }
             _camera.Target = _physics.Position;
 
