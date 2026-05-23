@@ -729,17 +729,25 @@ public sealed class GameStage : Stage
         {
             return;
         }
-        _skill.SetSkills(records.Select(r => new SkillBook.SkillEntry
+        _skill.SetSkills(records.Select(r =>
         {
-            Id = r.SkillId,
-            Name = Game.Names.SkillName(r.SkillId) ?? $"Skill {r.SkillId}",
-            Level = r.Level,
-            MaxLevel = r.MasterLevel > 0 ? r.MasterLevel : 20,
-            Passive = false,              // active/passive split needs Skill.wz; treat as castable
+            var info = Game.Skills.Get(r.SkillId);
+            return new SkillBook.SkillEntry
+            {
+                Id = r.SkillId,
+                Name = Game.Names.SkillName(r.SkillId) ?? $"Skill {r.SkillId}",
+                Level = r.Level,
+                MaxLevel = info?.MaxLevel ?? (r.MasterLevel > 0 ? r.MasterLevel : 20),
+                Passive = info?.Passive ?? false,
+                MpCost = info?.MpConAt(Math.Max(1, r.Level)) ?? 0,
+                IconCanvas = info?.Icon,
+            };
         }));
     }
 
-    // Double-click a learned active skill → cast it; optimistically show the buff.
+    // Double-click a learned active skill → cast it. Buff skills (those with a
+    // Skill.wz duration) show an optimistic buff icon with the real duration; cast
+    // starts the real cooldown. (Full TemporaryStatSet decode is still deferred.)
     private void CastSkill(int skillId, int level)
     {
         if (!Game.Session.IsConnected)
@@ -747,10 +755,18 @@ public sealed class GameStage : Stage
             return;
         }
         Game.Session.Send(GameSender.UseSkill(skillId, (byte)level));
-        // Optimistic buff icon — the full TemporaryStatSet decode is deferred, so
-        // we surface the skill the player just cast with a default duration.
-        const int defaultBuffSeconds = 120;
-        _buffList?.AddBuff(Game.Names.SkillName(skillId) ?? $"Skill {skillId}", defaultBuffSeconds);
+
+        var info = Game.Skills.Get(skillId);
+        var buffSeconds = info?.BuffTimeAt(level) ?? 0;
+        if (buffSeconds > 0)
+        {
+            _buffList?.AddBuff(Game.Names.SkillName(skillId) ?? $"Skill {skillId}", buffSeconds);
+        }
+        var cooldown = info?.CooltimeAt(level) ?? 0;
+        if (cooldown > 0)
+        {
+            _skill?.StartCooldown(skillId, cooldown);
+        }
     }
 
     // Double-click in the item grid: use a consumable, or equip an equip.

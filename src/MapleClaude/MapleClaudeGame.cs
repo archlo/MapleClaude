@@ -1,4 +1,5 @@
 using MapleClaude.App;
+using MapleClaude.Character;
 using MapleClaude.Debug;
 using MapleClaude.Net.Handlers;
 using MapleClaude.Net.Session;
@@ -40,6 +41,7 @@ public sealed class MapleClaudeGame : Game
     private WzPackage? _itemWz;
     private WzPackage? _mobWz;
     private WzPackage? _stringWz;
+    private WzPackage? _skillWz;
     private WzTextureLoader? _cursorLoader;
     private MapleCursor? _cursor;
     private UI.BuiltInFont? _font;
@@ -86,11 +88,15 @@ public sealed class MapleClaudeGame : Game
     public WzPackage? ItemWz => _itemWz;
     public WzPackage? MobWz  => _mobWz;
     public WzPackage? StringWz => _stringWz;
+    public WzPackage? SkillWz => _skillWz;
     // Back-compat alias for stages that referenced the longer name.
     public WzPackage? CharacterWz => _charWz;
 
     /// <summary>Display-name lookup over String.wz (items/skills/maps/mobs/npcs).</summary>
     public NameService Names { get; }
+
+    /// <summary>Skill data (max level, passive, MP/cooldown/duration, icon) from Skill.wz.</summary>
+    public SkillInfoService Skills { get; }
 
     /// <summary>Shared registry of tunable items exposed to the debug window.</summary>
     public DebugRegistry DebugRegistry { get; }
@@ -141,6 +147,7 @@ public sealed class MapleClaudeGame : Game
         Settings = new SettingsStore(loggerFactory.CreateLogger<SettingsStore>());
         StringPool = new StringPool(loggerFactory.CreateLogger<StringPool>(), Settings.Load().Language);
         Names = new NameService(() => _stringWz, loggerFactory.CreateLogger<NameService>());
+        Skills = new SkillInfoService(() => _skillWz, loggerFactory.CreateLogger<SkillInfoService>());
         DebugRegistry = debugRegistry;
         Session = session;
         LoginHandlers = loginHandlers;
@@ -532,6 +539,7 @@ public sealed class MapleClaudeGame : Game
         _itemWz = TryOpen(Path.Combine(_wzDir, "Item.wz"));
         _mobWz  = TryOpen(Path.Combine(_wzDir, "Mob.wz"));
         _stringWz = TryOpen(Path.Combine(_wzDir, "String.wz"));
+        _skillWz = TryOpen(Path.Combine(_wzDir, "Skill.wz"));
     }
 
     private WzPackage? TryOpen(string path)

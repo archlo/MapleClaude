@@ -29,6 +29,12 @@ public sealed class SkillBook : GamePanel
         public int   Level;
         public int   MaxLevel = 20;
         public bool  Passive;
+        public int   MpCost;
+        /// <summary>Skill.wz icon canvas (loaded into <see cref="Icon"/> by the panel).</summary>
+        public WzCanvas? IconCanvas;
+        internal WzSprite? Icon;
+        internal float Cooldown;       // seconds remaining
+        internal float CooldownTotal;  // seconds (for the sweep overlay)
     }
 
     private readonly List<SkillEntry>   _skills     = new();
@@ -63,6 +69,7 @@ public sealed class SkillBook : GamePanel
     private int _lastClickRow = -1;
 
     private readonly BuiltInFont? _font;
+    private readonly WzTextureLoader _loader;
 
     // Panel geometry
     private const int PanelW = 172;
@@ -73,6 +80,7 @@ public sealed class SkillBook : GamePanel
     public SkillBook(WzTextureLoader loader, WzPackage? ui, BuiltInFont? font)
     {
         _font = font;
+        _loader = loader;
         IsVisible = false;
         Position = new Vector2(190, 40);
 
@@ -120,8 +128,26 @@ public sealed class SkillBook : GamePanel
     {
         _skills.Clear();
         _skills.AddRange(skills);
+        foreach (var s in _skills)
+        {
+            if (s.Icon is null && s.IconCanvas is not null) s.Icon = _loader.Load(s.IconCanvas);
+        }
         RebuildTabs();
     }
+
+    /// <summary>Start a cooldown on a skill (seconds). Blocks re-cast + shows a sweep
+    /// overlay until it elapses. A zero/negative duration is a no-op.</summary>
+    public void StartCooldown(int skillId, float seconds)
+    {
+        if (seconds <= 0) return;
+        var sk = _skills.Find(s => s.Id == skillId);
+        if (sk is null) return;
+        sk.Cooldown = seconds;
+        sk.CooldownTotal = seconds;
+    }
+
+    /// <summary>True if the skill is currently cooling down.</summary>
+    public bool IsOnCooldown(int skillId) => _skills.Find(s => s.Id == skillId)?.Cooldown > 0;
 
     private void LoadDefaultSkills()
     {
@@ -171,6 +197,12 @@ public sealed class SkillBook : GamePanel
     public override void Update(GameTime gameTime)
     {
         LayoutButtons();
+        // Tick skill cooldowns.
+        var dt = (float)gameTime.ElapsedGameTime.TotalSeconds;
+        foreach (var s in _skills)
+        {
+            if (s.Cooldown > 0) s.Cooldown = Math.Max(0, s.Cooldown - dt);
+        }
         // Enable SP-up buttons only when SP > 0 and skill not maxed
         var tab   = ActiveTab();
         for (var i = 0; i < 12; i++)
@@ -244,15 +276,30 @@ public sealed class SkillBook : GamePanel
     private void DrawSkillRow(SpriteBatch sb, Texture2D white,
         SkillEntry sk, int px, int rowY, int rowIdx)
     {
-        // Icon placeholder
-        sb.Draw(white, new Rectangle(px + 4, rowY + 4, 24, 24), new Color(40, 40, 60));
-        DrawBorder(sb, white, new Rectangle(px + 4, rowY + 4, 24, 24), new Color(80, 80, 100));
+        // Icon (real Skill.wz icon when available, else a placeholder box)
+        var iconRect = new Rectangle(px + 4, rowY + 4, 24, 24);
+        if (sk.Icon is not null)
+            sb.Draw(sk.Icon.Texture, new Rectangle(iconRect.X, iconRect.Y, 24, 24), Color.White);
+        else
+            sb.Draw(white, iconRect, new Color(40, 40, 60));
+        DrawBorder(sb, white, iconRect, new Color(80, 80, 100));
 
-        // Skill name
-        _font?.Draw(sb, sk.Name, new Vector2(px + 32, rowY + 4), Color.White);
+        // Cooldown overlay (darken the icon + show remaining seconds).
+        if (sk.Cooldown > 0)
+        {
+            sb.Draw(white, iconRect, new Color(0, 0, 0, 150));
+            _font?.Draw(sb, ((int)Math.Ceiling(sk.Cooldown)).ToString(),
+                new Vector2(iconRect.X + 6, iconRect.Y + 6), new Color(255, 220, 120));
+        }
 
-        // Level
-        var lvStr = $"{sk.Level}/{sk.MaxLevel}";
+        // Skill name (dimmed for passive skills, which can't be cast)
+        _font?.Draw(sb, sk.Name, new Vector2(px + 32, rowY + 4),
+            sk.Passive ? new Color(150, 150, 170) : Color.White);
+
+        // Level (+ MP cost for active skills)
+        var lvStr = sk.MpCost > 0 && !sk.Passive
+            ? $"{sk.Level}/{sk.MaxLevel}  {sk.MpCost} MP"
+            : $"{sk.Level}/{sk.MaxLevel}";
         _font?.Draw(sb, lvStr, new Vector2(px + 32, rowY + 16),
             sk.Level >= sk.MaxLevel ? new Color(200, 180, 80) : new Color(160, 200, 160));
 
@@ -292,7 +339,7 @@ public sealed class SkillBook : GamePanel
                 if (_lastClickRow == abs && now - _lastClickTime < 0.4)
                 {
                     var sk = tab[abs];
-                    if (!sk.Passive && sk.Level > 0)
+                    if (!sk.Passive && sk.Level > 0 && sk.Cooldown <= 0)
                     {
                         OnSkillCast?.Invoke(sk.Id, sk.Level);
                     }
