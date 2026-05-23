@@ -72,6 +72,8 @@ public sealed class FieldHandlers
     public event Action<List<PartyMember>, int>? OnPartyLoad;
     /// <summary>Friend list (re)loaded.</summary>
     public event Action<List<FriendInfo>>?      OnFriendList;
+    /// <summary>Guild roster (re)loaded; null = not in a guild.</summary>
+    public event Action<GuildLoadArgs?>?        OnGuildLoad;
 
     // ── NPC script ────────────────────────────────────────────────────────────
     public event Action<ScriptMessageArgs>?     OnScriptMessage;
@@ -135,6 +137,7 @@ public sealed class FieldHandlers
         OnPartyInvite         = null;
         OnPartyLoad           = null;
         OnFriendList          = null;
+        OnGuildLoad           = null;
         OnScriptMessage       = null;
         OnShopOpen            = null;
         OnShopResult          = null;
@@ -171,6 +174,7 @@ public sealed class FieldHandlers
         router.Register(OutHeader.Whisper,             (p, s) => HandleWhisper(p));
         router.Register(OutHeader.PartyResult,         (p, s) => HandlePartyResult(p));
         router.Register(OutHeader.FriendResult,        (p, s) => HandleFriendResult(p));
+        router.Register(OutHeader.GuildResult,         (p, s) => HandleGuildResult(p));
         router.Register(OutHeader.ScriptMessage,       (p, s) => HandleScriptMessage(p));
         router.Register(OutHeader.OpenShopDlg,         (p, s) => HandleOpenShopDlg(p));
         router.Register(OutHeader.ShopResult,          (p, s) => HandleShopResult(p));
@@ -1006,6 +1010,60 @@ public sealed class FieldHandlers
         OnFriendList?.Invoke(friends);
     }
 
+    // ── Guild ───────────────────────────────────────────────────────────────────
+    // GuildResult: byte resultType. LoadGuild_Done(28) → byte hasGuild + Guild.encode:
+    //   int guildId, string name, 5×string gradeName, byte memberCount,
+    //   memberCount×int charId (column-major), memberCount×GuildMember(37):
+    //     string(13) name, int job, int level, int rank, int online, int 0, int allianceRank;
+    //   int memberMax, short markBg, byte markBgColor, short mark, byte markColor,
+    //   string notice, int points, int allianceId, byte level, short 0 (skills).
+    private const int GuildResLoadGuildDone = 28;
+
+    private void HandleGuildResult(InPacket p)
+    {
+        var resultType = p.ReadByte();
+        if (resultType != GuildResLoadGuildDone)
+        {
+            _logger.LogDebug("GuildResult type {Type} not handled", resultType);
+            return;
+        }
+        if (!p.ReadBool())          // no guild
+        {
+            OnGuildLoad?.Invoke(null);
+            return;
+        }
+        var args = new GuildLoadArgs
+        {
+            GuildId = p.ReadInt(),
+            Name = p.ReadString(),
+        };
+        for (var i = 0; i < 5; i++) p.ReadString();   // grade names
+
+        var memberCount = p.ReadByte();
+        var ids = new int[memberCount];
+        for (var i = 0; i < memberCount; i++) ids[i] = p.ReadInt();
+        for (var i = 0; i < memberCount; i++)
+        {
+            var name        = p.ReadString(13);
+            var job         = p.ReadInt();
+            var level       = p.ReadInt();
+            var rank        = p.ReadInt();
+            var online      = p.ReadInt();
+            p.ReadInt();                                // commitment
+            p.ReadInt();                                // alliance rank
+            args.Members.Add(new GuildMemberArg
+            {
+                CharacterId = ids[i],
+                Name = name,
+                Job = job,
+                Level = level,
+                Rank = rank,
+                Online = online != 0,
+            });
+        }
+        OnGuildLoad?.Invoke(args);
+    }
+
     // ── NPC Script ────────────────────────────────────────────────────────────
     // Mirrors upstream ScriptMessage.encode (kinoko/script/common/ScriptMessage.java):
     //   byte speakerType, int speakerId, byte msgType, byte messageParam,
@@ -1258,6 +1316,23 @@ public sealed class DropEnterArgs
 }
 
 public sealed class DropLeaveArgs { public int DropId; public byte LeaveType; }
+
+public sealed class GuildLoadArgs
+{
+    public int    GuildId;
+    public string Name = string.Empty;
+    public List<GuildMemberArg> Members = new();
+}
+
+public sealed class GuildMemberArg
+{
+    public int    CharacterId;
+    public string Name = string.Empty;
+    public int    Job;
+    public int    Level;
+    public int    Rank;      // 1=Master 2=Jr.Master 3-5=Member
+    public bool   Online;
+}
 
 public sealed class QuestRecordArgs
 {

@@ -251,6 +251,28 @@ public static class GameSender
         return p;
     }
 
+    // ── Guild (GuildRequest 149) ──────────────────────────────────────────────────
+    // Mirrors kinoko GuildRequestType (LoadGuild=0, WithdrawGuild=7).
+
+    // LoadGuild(0): byte type, no body. The server replies with GuildResult
+    // LoadGuild_Done (guild = null if the player has no guild).
+    public static OutPacket GuildLoad()
+    {
+        var p = OutPacket.Of(InHeader.GuildRequest);
+        p.WriteByte(0);
+        return p;
+    }
+
+    // WithdrawGuild(7): byte type, int characterId, string characterName.
+    public static OutPacket GuildLeave(int characterId, string characterName)
+    {
+        var p = OutPacket.Of(InHeader.GuildRequest);
+        p.WriteByte(7);
+        p.WriteInt(characterId);
+        p.WriteString(characterName);
+        return p;
+    }
+
     // UserSelectNpc(63): int objectId, short userX, short userY
     // (upstream UserHandler.handleUserSelectNpc reads the player's position).
     public static OutPacket UserSelectNpc(int npcObjId, short userX, short userY)

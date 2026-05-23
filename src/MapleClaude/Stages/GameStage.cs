@@ -107,6 +107,7 @@ public sealed class GameStage : Stage
     private string _currentBgm = string.Empty;
     private string _mapStreet = string.Empty;
     private string _mapNameText = string.Empty;
+    private bool _guildLoadSent;
 
     // One-shot debug-log latch for the not-yet-implemented MobMove(227)
     // outgoing path; see comment block in Update.
@@ -606,6 +607,19 @@ public sealed class GameStage : Stage
             _logger.LogInformation("Party loaded: {Count} member(s) boss={Boss}", members.Count, bossId);
         };
 
+        fh.OnGuildLoad += args =>
+        {
+            if (_userList is null) return;
+            if (args is null) { _userList.SetGuild(string.Empty, Array.Empty<UserList.GuildEntry>()); return; }
+            _userList.SetGuild(args.Name, args.Members.Select(m => new UserList.GuildEntry
+            {
+                Name   = m.Name,
+                Rank   = GuildRankName(m.Rank),
+                Online = m.Online,
+            }));
+            _logger.LogInformation("Guild loaded: {Name} ({Count} members)", args.Name, args.Members.Count);
+        };
+
         fh.OnPartyInvite += (inviterId, name) =>
         {
             _pendingInviterId = inviterId;
@@ -698,6 +712,12 @@ public sealed class GameStage : Stage
         if (args.Look is not null && _player is not null && _charRenderer is not null)
         {
             _player.SetAvatar(_charRenderer, args.Look);
+        }
+        // Ask the server for our guild roster once (it isn't pushed on login).
+        if (!_guildLoadSent && Game.Session.IsConnected)
+        {
+            Game.Session.Send(GameSender.GuildLoad());
+            _guildLoadSent = true;
         }
         try
         {
@@ -966,6 +986,15 @@ public sealed class GameStage : Stage
             _currentBgm = bgm;
         }
     }
+
+    // Guild rank (1=Master, 2=Jr.Master, 3-5=Member) → label.
+    private static string GuildRankName(int rank) => rank switch
+    {
+        1 => "Master",
+        2 => "Jr. Master",
+        >= 3 and <= 5 => "Member",
+        _ => string.Empty,
+    };
 
     // ShopResultType (kinoko) → a player-facing line for the status messenger.
     private static string ShopResultText(ShopResultArgs a) => a.ResultType switch

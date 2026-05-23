@@ -63,6 +63,7 @@ public sealed class UserList : GamePanel
     private readonly List<Button> _allButtons = new();
 
     private Tab  _activeTab   = Tab.Friend;
+    private string _guildName = string.Empty;
     private int  _scroll;
     private bool _dragging;
     private Vector2 _dragOff;
@@ -111,7 +112,12 @@ public sealed class UserList : GamePanel
     public void AddFriend(FriendEntry e) => _friends.Add(e);
     public void ClearFriends() { _friends.Clear(); _scroll = 0; }
     public void SetParty(IEnumerable<PartyEntry> p) { _party.Clear(); _party.AddRange(p); }
-    public void SetGuild(IEnumerable<GuildEntry> g) { _guild.Clear(); _guild.AddRange(g); }
+    public void SetGuild(string name, IEnumerable<GuildEntry> g)
+    {
+        _guildName = name;
+        _guild.Clear();
+        _guild.AddRange(g);
+    }
 
     private void SetTab(Tab t) { _activeTab = t; _scroll = 0; }
 
@@ -262,7 +268,10 @@ public sealed class UserList : GamePanel
             _font?.Draw(sb, "Not in a guild.", new Vector2(px + 40, py + 60), new Color(100, 100, 110));
             return;
         }
-        for (var i = 0; i < Math.Min(_guild.Count, ListRows); i++)
+        // Guild name header
+        _font?.Draw(sb, _guildName, new Vector2(px + 6, py), new Color(220, 200, 120));
+        py += 16;
+        for (var i = 0; i < Math.Min(_guild.Count, ListRows - 1); i++)
         {
             var g   = _guild[i];
             var ry  = py + i * EntryH;
@@ -329,7 +338,6 @@ public sealed class UserList : GamePanel
         _friends.Add(new FriendEntry { Name = "Scania",  Level = 72, Job = "Bowman",   Location = "Aqua Road",      Online = false });
         _friends.Add(new FriendEntry { Name = "Windia",  Level = 14, Job = "Beginner", Location = "Maple Island",   Online = false });
         _party.Add  (new PartyEntry  { Name = "Hero",    Level = 1,  Job = "Beginner", HpPct = 100 });
-        _guild.Add  (new GuildEntry  { Name = "MapleGuild", Rank = "Jr. Master", Online = true });
     }
 
     private Button? MakeBtn(WzTextureLoader loader, WzProperty? root, string name, Action onClick)
