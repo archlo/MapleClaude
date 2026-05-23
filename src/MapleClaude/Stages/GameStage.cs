@@ -104,6 +104,8 @@ public sealed class GameStage : Stage
     private PlayerController? _physics;
     private byte _fieldKey;
     private string _currentBgm = string.Empty;
+    private string _mapStreet = string.Empty;
+    private string _mapNameText = string.Empty;
 
     // One-shot debug-log latch for the not-yet-implemented MobMove(227)
     // outgoing path; see comment block in Update.
@@ -216,7 +218,7 @@ public sealed class GameStage : Stage
         _statusBar.OnMenu    = () => _optionMenu!.IsVisible = !_optionMenu.IsVisible;
 
         // MiniMap: set map info and initial bounds
-        _miniMap.SetMapInfo("Maple Road", "Henesys", new Rectangle(-3000, -2000, 6000, 4000));
+        _miniMap.SetMapInfo(string.Empty, string.Empty, new Rectangle(-3000, -2000, 6000, 4000));
 
         _panels.Add(_statusBar);
         _panels.Add(_chatBar);
@@ -432,8 +434,11 @@ public sealed class GameStage : Stage
             var existing = _npcs.FirstOrDefault(n => n.ObjId == args.ObjId);
             if (existing is null)
             {
-                var npc = new NpcLook(args.TemplateId, new Vector2(args.X, args.Y), Game.Font);
-                npc.ObjId = args.ObjId;
+                var npc = new NpcLook(args.TemplateId, new Vector2(args.X, args.Y), Game.Font)
+                {
+                    ObjId = args.ObjId,
+                    Name  = Game.Names.NpcName(args.TemplateId) ?? string.Empty,
+                };
                 npc.Load(_loader!, _npcWz);
                 npc.FaceLeft(args.FacingLeft);
                 _npcs.Add(npc);
@@ -673,6 +678,7 @@ public sealed class GameStage : Stage
                                 _field.Info.VRBottom - _field.Info.VRTop)
                 : _camera.MapBounds;
             PopulateInventory(args);
+            UpdateMapName(args.Stat.PosMap);
             PlayMapBgm(_field.Info.Bgm);
             _logger.LogInformation("SetField processed — mapId={Map} portal={Portal} money={Money}",
                 args.Stat.PosMap, args.Stat.Portal, args.Money);
@@ -716,7 +722,7 @@ public sealed class GameStage : Stage
         _skill.SetSkills(records.Select(r => new SkillBook.SkillEntry
         {
             Id = r.SkillId,
-            Name = $"Skill {r.SkillId}",   // String.wz/Skill.img name lookup deferred
+            Name = Game.Names.SkillName(r.SkillId) ?? $"Skill {r.SkillId}",
             Level = r.Level,
             MaxLevel = r.MasterLevel > 0 ? r.MasterLevel : 20,
             Passive = false,              // active/passive split needs Skill.wz; treat as castable
@@ -734,7 +740,7 @@ public sealed class GameStage : Stage
         // Optimistic buff icon — the full TemporaryStatSet decode is deferred, so
         // we surface the skill the player just cast with a default duration.
         const int defaultBuffSeconds = 120;
-        _buffList?.AddBuff($"Skill {skillId}", defaultBuffSeconds);
+        _buffList?.AddBuff(Game.Names.SkillName(skillId) ?? $"Skill {skillId}", defaultBuffSeconds);
     }
 
     // Double-click in the item grid: use a consumable, or equip an equip.
@@ -797,8 +803,10 @@ public sealed class GameStage : Stage
         _                     => -1, // Equipped
     };
 
-    private static string ItemDisplayName(InventoryItem it) =>
-        string.IsNullOrEmpty(it.Title) ? $"Item {it.ItemId:D7}" : it.Title;
+    // Prefer the wire-provided title, then the String.wz name, then a formatted id.
+    private string ItemDisplayName(InventoryItem it) =>
+        !string.IsNullOrEmpty(it.Title) ? it.Title
+            : Game.Names.ItemName(it.ItemId) ?? $"Item {it.ItemId:D7}";
 
     // ── Settings persistence ────────────────────────────────────────────────────
 
@@ -837,6 +845,22 @@ public sealed class GameStage : Stage
         if (_optionMenu is null) return;
         Game.AudioPlayer.Volume    = _optionMenu.BgmVolume / 100f;
         Game.AudioPlayer.SfxVolume = _optionMenu.SfxVolume / 100f;
+    }
+
+    // Resolve the map's display name from String.wz ("street : name") for the
+    // mini-map header. Falls back to empty (the mini-map then shows just bounds).
+    private void UpdateMapName(int mapId)
+    {
+        var combined = Game.Names.MapName(mapId);
+        if (string.IsNullOrEmpty(combined))
+        {
+            _mapStreet = string.Empty;
+            _mapNameText = $"Map {mapId}";
+            return;
+        }
+        var parts = combined.Split(" : ", 2, StringSplitOptions.None);
+        _mapStreet   = parts.Length == 2 ? parts[0] : string.Empty;
+        _mapNameText = parts.Length == 2 ? parts[1] : combined;
     }
 
     // Resolve a map's "info/bgm" value (e.g. "Bgm00/SleepyWood") to a Sound.wz
@@ -1026,7 +1050,7 @@ public sealed class GameStage : Stage
 
         // Feed MiniMap map bounds so the coordinate projection matches the camera
         if (_miniMap != null)
-            _miniMap.SetMapInfo("Maple Road", "Henesys", _camera.MapBounds);
+            _miniMap.SetMapInfo(_mapStreet, _mapNameText, _camera.MapBounds);
 
         // Sync stats to panels
         if (_statusBar != null)

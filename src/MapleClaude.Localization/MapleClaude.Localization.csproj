@@ -18,4 +18,9 @@
     <PackageReference Include="Microsoft.Extensions.Logging.Abstractions" />
   </ItemGroup>
 
+  <ItemGroup>
+    <!-- NameService resolves display names from String.wz via the WZ reader. -->
+    <ProjectReference Include="..\MapleClaude.Wz\MapleClaude.Wz.csproj" />
+  </ItemGroup>
+
 </Project>

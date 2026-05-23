@@ -39,6 +39,7 @@ public sealed class MapleClaudeGame : Game
     private WzPackage? _npcWz;
     private WzPackage? _itemWz;
     private WzPackage? _mobWz;
+    private WzPackage? _stringWz;
     private WzTextureLoader? _cursorLoader;
     private MapleCursor? _cursor;
     private UI.BuiltInFont? _font;
@@ -84,8 +85,12 @@ public sealed class MapleClaudeGame : Game
     public WzPackage? NpcWz => _npcWz;
     public WzPackage? ItemWz => _itemWz;
     public WzPackage? MobWz  => _mobWz;
+    public WzPackage? StringWz => _stringWz;
     // Back-compat alias for stages that referenced the longer name.
     public WzPackage? CharacterWz => _charWz;
+
+    /// <summary>Display-name lookup over String.wz (items/skills/maps/mobs/npcs).</summary>
+    public NameService Names { get; }
 
     /// <summary>Shared registry of tunable items exposed to the debug window.</summary>
     public DebugRegistry DebugRegistry { get; }
@@ -135,6 +140,7 @@ public sealed class MapleClaudeGame : Game
         AudioPlayer = new WzAudioPlayer(loggerFactory.CreateLogger<WzAudioPlayer>());
         Settings = new SettingsStore(loggerFactory.CreateLogger<SettingsStore>());
         StringPool = new StringPool(loggerFactory.CreateLogger<StringPool>(), Settings.Load().Language);
+        Names = new NameService(() => _stringWz, loggerFactory.CreateLogger<NameService>());
         DebugRegistry = debugRegistry;
         Session = session;
         LoginHandlers = loginHandlers;
@@ -525,6 +531,7 @@ public sealed class MapleClaudeGame : Game
         _npcWz  = TryOpen(Path.Combine(_wzDir, "Npc.wz"));
         _itemWz = TryOpen(Path.Combine(_wzDir, "Item.wz"));
         _mobWz  = TryOpen(Path.Combine(_wzDir, "Mob.wz"));
+        _stringWz = TryOpen(Path.Combine(_wzDir, "String.wz"));
     }
 
     private WzPackage? TryOpen(string path)
