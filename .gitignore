@@ -209,6 +209,11 @@ refs/
 /private/
 *.wz
 *.img
+# The *.wz glob above also matches our source dir name (MapleClaude.Wz) on
+# case-insensitive filesystems (Windows/macOS, core.ignorecase=true), which
+# silently un-tracks the entire WZ reader project. Re-include the source dir;
+# real *.wz/*.img asset files placed inside it are still ignored.
+!src/MapleClaude.Wz/
 fixtures/private/
 tests/Fixtures/private/
 

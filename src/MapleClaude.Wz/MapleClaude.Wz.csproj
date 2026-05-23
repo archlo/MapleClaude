@@ -1,0 +1,17 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <RootNamespace>MapleClaude.Wz</RootNamespace>
+    <AssemblyName>MapleClaude.Wz</AssemblyName>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="CommunityToolkit.HighPerformance" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <InternalsVisibleTo Include="MapleClaude.Wz.Tests" />
+  </ItemGroup>
+
+</Project>
