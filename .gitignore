@@ -22,6 +22,10 @@ CLAUDE.local.md
 [Ll]og/
 [Ll]ogs/
 [Dd]ebug/
+# The [Dd]ebug/ build-output pattern above also matches our source folder
+# src/MapleClaude/Debug/ (in-game debug overlay), silently un-tracking it.
+# Re-include the source dir; bin/obj Debug build dirs stay ignored (different paths).
+!src/MapleClaude/Debug/
 [Dd]ebugPublic/
 [Rr]elease/
 [Rr]eleases/
