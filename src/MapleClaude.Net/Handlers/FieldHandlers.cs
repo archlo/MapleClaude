@@ -80,6 +80,10 @@ public sealed class FieldHandlers
     public event Action<ShopOpenArgs>?          OnShopOpen;
     public event Action<ShopResultArgs>?        OnShopResult;
 
+    // ── Quests ────────────────────────────────────────────────────────────────────
+    /// <summary>A quest record changed (Message QuestRecord / QuestRecordEx).</summary>
+    public event Action<QuestRecordArgs>?       OnQuestRecord;
+
     // ── Skills / buffs ─────────────────────────────────────────────────────────
     public event Action<List<SkillRecord>>?     OnSkillRecordResult;
     /// <summary>A buff (temporary-stat) set occurred — full per-stat decode is
@@ -134,6 +138,7 @@ public sealed class FieldHandlers
         OnScriptMessage       = null;
         OnShopOpen            = null;
         OnShopResult          = null;
+        OnQuestRecord         = null;
         OnSkillRecordResult   = null;
         OnTemporaryStatSet    = null;
         OnTemporaryStatReset  = null;
@@ -234,6 +239,8 @@ public sealed class FieldHandlers
                 p.ReadLong();                       // aEquipExtExpire (FileTime)
                 args.Inventory = DecodeInventory(p);
                 args.Skills = DecodeSkillRecords(p); // DBChar.SKILLRECORD section
+                DecodeSkillCooltime(p);              // DBChar.SKILLCOOLTIME (skipped)
+                args.Quests = DecodeQuestRecords(p); // DBChar.QUESTRECORD (in-progress)
             }
             catch (Exception ex)
             {
@@ -322,6 +329,32 @@ public sealed class FieldHandlers
             records.Add(new SkillRecord { SkillId = skillId, Level = level, MasterLevel = masterLevel });
         }
         return records;
+    }
+
+    // CharacterData SKILLCOOLTIME section: short count, per { int skillId, short cooltime }.
+    private static void DecodeSkillCooltime(InPacket p)
+    {
+        var count = p.ReadShort();
+        for (var i = 0; i < count; i++)
+        {
+            p.ReadInt();    // skillId
+            p.ReadShort();  // cooltime seconds
+        }
+    }
+
+    // CharacterData QUESTRECORD section (in-progress): short count, per
+    // { short questId, string value }.
+    private static List<QuestRecordArgs> DecodeQuestRecords(InPacket p)
+    {
+        var quests = new List<QuestRecordArgs>();
+        var count = p.ReadShort();
+        for (var i = 0; i < count; i++)
+        {
+            var questId = p.ReadShort();
+            var value = p.ReadString();
+            quests.Add(new QuestRecordArgs { QuestId = questId, State = 1, Value = value });
+        }
+        return quests;
     }
 
     // Mirrors upstream SkillConstants.isSkillNeedMasterLevel for common jobs:
@@ -449,6 +482,24 @@ public sealed class FieldHandlers
                     // subtype < 0: a warning (inventory full, etc.) — no body.
                 }
                 OnLootMessage?.Invoke(args);
+                break;
+            }
+            case 1:                                   // QuestRecord
+            {
+                var questId = p.ReadShort();
+                var state = p.ReadByte();             // 0=None 1=Perform 2=Complete
+                var value = string.Empty;
+                if (state == 1) value = p.ReadString();       // PERFORM → progress string
+                else if (state == 2) p.ReadLong();            // COMPLETE → FileTime
+                else if (state == 0) p.ReadByte();            // NONE → delete flag
+                OnQuestRecord?.Invoke(new QuestRecordArgs { QuestId = questId, State = state, Value = value });
+                break;
+            }
+            case 11:                                  // QuestRecordEx
+            {
+                var questId = p.ReadShort();
+                var value = p.ReadString();
+                OnQuestRecord?.Invoke(new QuestRecordArgs { QuestId = questId, State = 1, Value = value, IsEx = true });
                 break;
             }
         }
@@ -1154,6 +1205,8 @@ public sealed class SetFieldArgs
     public Dictionary<InventoryType, List<(short pos, InventoryItem item)>>? Inventory { get; set; }
     /// <summary>Learned skills delivered in CharacterData's SKILLRECORD section.</summary>
     public List<SkillRecord>? Skills { get; set; }
+    /// <summary>In-progress quests from CharacterData's QUESTRECORD section.</summary>
+    public List<QuestRecordArgs>? Quests { get; set; }
 }
 
 public sealed class StatChangedArgs
@@ -1205,6 +1258,14 @@ public sealed class DropEnterArgs
 }
 
 public sealed class DropLeaveArgs { public int DropId; public byte LeaveType; }
+
+public sealed class QuestRecordArgs
+{
+    public int    QuestId;
+    public byte   State;        // 0=None(removed) 1=Perform(active) 2=Complete
+    public string Value = string.Empty;
+    public bool   IsEx;
+}
 
 public sealed class ShopOpenArgs
 {

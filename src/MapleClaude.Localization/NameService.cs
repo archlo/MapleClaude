@@ -23,17 +23,21 @@ public sealed class NameService
     ];
 
     private readonly Func<WzPackage?> _stringWz;
+    private readonly Func<WzPackage?>? _questWz;
     private readonly ILogger? _logger;
 
     private Dictionary<int, string>? _items;
+    private Dictionary<int, string>? _quests;
     private Dictionary<int, string>? _maps;
     private Dictionary<int, string>? _mobs;
     private Dictionary<int, string>? _npcs;
     private Dictionary<int, string>? _skills;
 
-    public NameService(Func<WzPackage?> stringWzProvider, ILogger? logger = null)
+    public NameService(Func<WzPackage?> stringWzProvider, ILogger? logger = null,
+                       Func<WzPackage?>? questWzProvider = null)
     {
         _stringWz = stringWzProvider;
+        _questWz = questWzProvider;
         _logger = logger;
     }
 
@@ -42,6 +46,7 @@ public sealed class NameService
     public string? MapName(int id)   => Maps().GetValueOrDefault(id);
     public string? MobName(int id)   => Mobs().GetValueOrDefault(id);
     public string? NpcName(int id)   => Npcs().GetValueOrDefault(id);
+    public string? QuestName(int id) => Quests().GetValueOrDefault(id);
 
     // ── Lazy category loaders ───────────────────────────────────────────────────
 
@@ -50,6 +55,24 @@ public sealed class NameService
     private Dictionary<int, string> Mobs()   => _mobs   ??= LoadFlatImage("Mob.img");
     private Dictionary<int, string> Npcs()   => _npcs   ??= LoadNpcs();
     private Dictionary<int, string> Skills() => _skills ??= LoadSkills();
+    private Dictionary<int, string> Quests() => _quests ??= LoadQuests();
+
+    // Quest.wz/QuestInfo.img/<id>/name.
+    private Dictionary<int, string> LoadQuests()
+    {
+        var dict = new Dictionary<int, string>();
+        var wz = _questWz?.Invoke();
+        if (wz?.GetItem("QuestInfo.img") is not WzImage image) return dict;
+        try
+        {
+            AddNames(image.Root, dict);
+        }
+        catch (Exception ex)
+        {
+            _logger?.LogWarning(ex, "NameService: failed loading quest names");
+        }
+        return dict;
+    }
 
     private Dictionary<int, string> LoadItems()
     {

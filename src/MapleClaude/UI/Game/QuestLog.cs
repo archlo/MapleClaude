@@ -13,7 +13,13 @@ namespace MapleClaude.UI.Game;
 /// </summary>
 public sealed class QuestLog : GamePanel
 {
-    private sealed record QuestEntry(string Name, string Npc, string Desc, int Level, bool Complete);
+    public sealed class QuestEntry
+    {
+        public int    Id;
+        public string Name     = string.Empty;
+        public string Progress = string.Empty;
+        public bool   Complete;
+    }
 
     private readonly WzSprite? _background;
     private readonly Button? _btClose;
@@ -22,17 +28,42 @@ public sealed class QuestLog : GamePanel
     // Tabs
     private int _tab; // 0=In Progress, 1=Complete
     private int _scroll;
+    private int _selected = -1;
 
-    private static readonly QuestEntry[] _allQuests =
-    [
-        new("A Strange Letter",       "Shanks",       "Deliver a letter to the chief of Amherst.",          1,  false),
-        new("Ernie's Concern",        "Ernie",        "Collect 10 Blue Snail Shells for Ernie.",            3,  false),
-        new("The Dangerous Forest",   "Chief Stan",   "Hunt 30 Orange Mushrooms in the Dangerous Forest.",  7,  false),
-        new("Cold Wind from Ariant",  "Manji",        "Collect 20 Wooden Boards for Manji.",               10,  false),
-        new("Lith Harbor",            "Shanks",       "Arrive at Lith Harbor by talking to Shanks.",        1,  true),
-        new("Beginner's Tutorial",    "Maple Guide",  "Complete the tutorial quests on Maple Island.",      1,  true),
-        new("Recover the Mineral",    "Dances With Bears", "Collect 50 Steely from Leatties.",             15,  true),
-    ];
+    private readonly List<QuestEntry> _quests = new();
+
+    /// <summary>Resign (give up) an in-progress quest. Arg = quest id.</summary>
+    public Action<int>? OnResign { get; set; }
+
+    /// <summary>Replace the quest list (from CharacterData on SetField).</summary>
+    public void SetQuests(IEnumerable<QuestEntry> quests)
+    {
+        _quests.Clear();
+        _quests.AddRange(quests);
+        _selected = -1;
+    }
+
+    /// <summary>Apply a live quest record change. state: 0=removed, 1=active, 2=complete.</summary>
+    public void UpdateQuest(int id, byte state, string progress, string name)
+    {
+        var existing = _quests.Find(q => q.Id == id);
+        if (state == 0) // removed / resigned
+        {
+            if (existing != null) _quests.Remove(existing);
+            return;
+        }
+        existing ??= AddQuest(id, name);
+        if (!string.IsNullOrEmpty(name)) existing.Name = name;
+        existing.Progress = progress;
+        existing.Complete = state == 2;
+    }
+
+    private QuestEntry AddQuest(int id, string name)
+    {
+        var q = new QuestEntry { Id = id, Name = string.IsNullOrEmpty(name) ? $"Quest {id}" : name };
+        _quests.Add(q);
+        return q;
+    }
 
     private const int PanelW = 302;
     private const int PanelH = 396;
@@ -59,9 +90,8 @@ public sealed class QuestLog : GamePanel
             };
     }
 
-    private QuestEntry[] CurrentList => _tab == 0
-        ? [.. _allQuests.Where(q => !q.Complete)]
-        : [.. _allQuests.Where(q =>  q.Complete)];
+    private List<QuestEntry> CurrentList =>
+        _quests.Where(q => q.Complete == (_tab == 1)).ToList();
 
     public override void Draw(SpriteBatch sb, Texture2D white)
     {
@@ -91,14 +121,14 @@ public sealed class QuestLog : GamePanel
 
         // Quest list
         var list  = CurrentList;
-        var maxSc = Math.Max(0, list.Length - VisibleRows);
+        var maxSc = Math.Max(0, list.Count - VisibleRows);
         _scroll   = Math.Clamp(_scroll, 0, maxSc);
 
         for (var i = 0; i < VisibleRows; i++)
         {
             var idx = i + _scroll;
-            if (idx >= list.Length) break;
-            DrawEntry(sb, white, list[idx], px + 6, py + ListTop + i * EntryH);
+            if (idx >= list.Count) break;
+            DrawEntry(sb, white, list[idx], px + 6, py + ListTop + i * EntryH, list[idx].Id == _selected);
         }
 
         // Scroll arrows
@@ -108,7 +138,7 @@ public sealed class QuestLog : GamePanel
             DrawArrow(sb, white, new Rectangle(px + 154, py + ListBot + 4, 12, 10), false);
 
         // Empty state
-        if (list.Length == 0)
+        if (list.Count == 0)
             _font?.Draw(sb, "(none)", new Vector2(px + 120, py + 180), new Color(140, 140, 140));
 
         _btClose?.Draw(sb);
@@ -123,9 +153,10 @@ public sealed class QuestLog : GamePanel
         _font?.Draw(sb, label, new Vector2(x + 8, y + 3), c);
     }
 
-    private void DrawEntry(SpriteBatch sb, Texture2D white, QuestEntry q, int x, int y)
+    private void DrawEntry(SpriteBatch sb, Texture2D white, QuestEntry q, int x, int y, bool selected)
     {
-        sb.Draw(white, new Rectangle(x, y, PanelW - 12, EntryH - 2), new Color(25, 25, 45, 200));
+        var bg = selected ? new Color(55, 50, 90, 220) : new Color(25, 25, 45, 200);
+        sb.Draw(white, new Rectangle(x, y, PanelW - 12, EntryH - 2), bg);
         DrawBorder(sb, white, new Rectangle(x, y, PanelW - 12, EntryH - 2));
 
         // Status dot
@@ -134,14 +165,17 @@ public sealed class QuestLog : GamePanel
 
         // Name
         _font?.Draw(sb, q.Name, new Vector2(x + 16, y + 3), new Color(255, 230, 120));
-        // NPC
-        _font?.Draw(sb, $"NPC: {q.Npc}", new Vector2(x + 16, y + 18), new Color(160, 200, 240));
-        // Description (truncated to fit)
-        var desc = q.Desc.Length > 42 ? q.Desc[..42] + "…" : q.Desc;
-        _font?.Draw(sb, desc, new Vector2(x + 16, y + 33), new Color(190, 190, 190));
-        // Level req (right-aligned)
-        var lvlStr = $"Lv.{q.Level}+";
-        _font?.Draw(sb, lvlStr, new Vector2(x + PanelW - 50, y + 3), new Color(140, 200, 140));
+        // Progress value (raw quest record string), truncated to fit
+        if (!string.IsNullOrEmpty(q.Progress))
+        {
+            var prog = q.Progress.Length > 40 ? q.Progress[..40] + "…" : q.Progress;
+            _font?.Draw(sb, prog, new Vector2(x + 16, y + 20), new Color(190, 190, 190));
+        }
+        // Quest id (right-aligned)
+        _font?.Draw(sb, $"#{q.Id}", new Vector2(x + PanelW - 56, y + 3), new Color(140, 200, 140));
+        // Resign hint when selected + active
+        if (selected && !q.Complete)
+            _font?.Draw(sb, "[Del] resign", new Vector2(x + 16, y + 38), new Color(220, 140, 90));
     }
 
     private static void DrawArrow(SpriteBatch sb, Texture2D white, Rectangle r, bool up)
@@ -170,8 +204,17 @@ public sealed class QuestLog : GamePanel
             var list = CurrentList;
             if (new Rectangle(px + 138, py + ListBot + 4, 12, 10).Contains(x, y) && _scroll > 0)
                 { _scroll--; return true; }
-            if (new Rectangle(px + 154, py + ListBot + 4, 12, 10).Contains(x, y) && _scroll < Math.Max(0, list.Length - VisibleRows))
+            if (new Rectangle(px + 154, py + ListBot + 4, 12, 10).Contains(x, y) && _scroll < Math.Max(0, list.Count - VisibleRows))
                 { _scroll++; return true; }
+
+            // Quest row → select.
+            for (var i = 0; i < VisibleRows; i++)
+            {
+                var idx = i + _scroll;
+                if (idx >= list.Count) break;
+                var rowRect = new Rectangle(px + 6, py + ListTop + i * EntryH, PanelW - 12, EntryH - 2);
+                if (rowRect.Contains(x, y)) { _selected = list[idx].Id; return true; }
+            }
         }
 
         return new Rectangle(px, py, PanelW, PanelH).Contains(x, y);
@@ -182,7 +225,14 @@ public sealed class QuestLog : GamePanel
         if (!IsVisible) return false;
         if (key == Keys.Escape) { IsVisible = false; return true; }
         if (key == Keys.PageUp)   { _scroll = Math.Max(0, _scroll - VisibleRows); return true; }
-        if (key == Keys.PageDown) { _scroll = Math.Min(Math.Max(0, CurrentList.Length - VisibleRows), _scroll + VisibleRows); return true; }
+        if (key == Keys.PageDown) { _scroll = Math.Min(Math.Max(0, CurrentList.Count - VisibleRows), _scroll + VisibleRows); return true; }
+        // Resign the selected in-progress quest.
+        if (key == Keys.Delete && _selected >= 0)
+        {
+            var q = _quests.Find(e => e.Id == _selected);
+            if (q is { Complete: false }) OnResign?.Invoke(_selected);
+            return true;
+        }
         return true;
     }
 

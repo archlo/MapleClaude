@@ -42,6 +42,7 @@ public sealed class MapleClaudeGame : Game
     private WzPackage? _mobWz;
     private WzPackage? _stringWz;
     private WzPackage? _skillWz;
+    private WzPackage? _questWz;
     private WzTextureLoader? _cursorLoader;
     private MapleCursor? _cursor;
     private UI.BuiltInFont? _font;
@@ -146,7 +147,7 @@ public sealed class MapleClaudeGame : Game
         AudioPlayer = new WzAudioPlayer(loggerFactory.CreateLogger<WzAudioPlayer>());
         Settings = new SettingsStore(loggerFactory.CreateLogger<SettingsStore>());
         StringPool = new StringPool(loggerFactory.CreateLogger<StringPool>(), Settings.Load().Language);
-        Names = new NameService(() => _stringWz, loggerFactory.CreateLogger<NameService>());
+        Names = new NameService(() => _stringWz, loggerFactory.CreateLogger<NameService>(), () => _questWz);
         Skills = new SkillInfoService(() => _skillWz, loggerFactory.CreateLogger<SkillInfoService>());
         DebugRegistry = debugRegistry;
         Session = session;
@@ -540,6 +541,7 @@ public sealed class MapleClaudeGame : Game
         _mobWz  = TryOpen(Path.Combine(_wzDir, "Mob.wz"));
         _stringWz = TryOpen(Path.Combine(_wzDir, "String.wz"));
         _skillWz = TryOpen(Path.Combine(_wzDir, "Skill.wz"));
+        _questWz = TryOpen(Path.Combine(_wzDir, "Quest.wz"));
     }
 
     private WzPackage? TryOpen(string path)

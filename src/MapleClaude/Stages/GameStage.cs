@@ -194,6 +194,10 @@ public sealed class GameStage : Stage
         _skill.OnSkillCast = CastSkill;
         _stats = new StatsInfo(_loader, _ui, font);
         _quest = new QuestLog(_loader, _ui, font);
+        _quest.OnResign = id =>
+        {
+            if (Game.Session.IsConnected) Game.Session.Send(GameSender.QuestResign((short)id));
+        };
         _keyConfig = new KeyConfig(_loader, _ui, font);
         _optionMenu = new OptionMenu(_loader, _ui, font);
         _charInfo = new CharInfo(_loader, _ui, font);
@@ -402,6 +406,14 @@ public sealed class GameStage : Stage
             _shop.OpenShop(buy, sell);
         };
         fh.OnShopResult += args => _messenger?.Show(ShopResultText(args), StatusMessenger.MsgColor.White);
+
+        // ── Quests ────────────────────────────────────────────────────────────
+        fh.OnQuestRecord += a =>
+        {
+            _quest?.UpdateQuest(a.QuestId, a.State, a.Value,
+                Game.Names.QuestName(a.QuestId) ?? $"Quest {a.QuestId}");
+            if (a.State == 2) _messenger?.ShowQuest(Game.Names.QuestName(a.QuestId) ?? $"Quest {a.QuestId}");
+        };
 
         // ── In-game migration (channel transfer / cash-shop return) ───────────
         // The server replies to TransferChannel with MigrateCommand(16); reconnect
@@ -714,6 +726,7 @@ public sealed class GameStage : Stage
                                 _field.Info.VRBottom - _field.Info.VRTop)
                 : _camera.MapBounds;
             PopulateInventory(args);
+            PopulateQuests(args);
             UpdateMapName(args.Stat.PosMap);
             PlayMapBgm(_field.Info.Bgm);
             _logger.LogInformation("SetField processed — mapId={Map} portal={Portal} money={Money}",
@@ -990,6 +1003,18 @@ public sealed class GameStage : Stage
     };
 
     /// <summary>Load the initial inventory + skills delivered in SetField's CharacterData.</summary>
+    private void PopulateQuests(SetFieldArgs args)
+    {
+        if (_quest is null || args.Quests is null) return;
+        _quest.SetQuests(args.Quests.Select(q => new QuestLog.QuestEntry
+        {
+            Id = q.QuestId,
+            Name = Game.Names.QuestName(q.QuestId) ?? $"Quest {q.QuestId}",
+            Progress = q.Value,
+            Complete = false,
+        }));
+    }
+
     private void PopulateInventory(SetFieldArgs args)
     {
         if (args.Skills is { Count: > 0 })

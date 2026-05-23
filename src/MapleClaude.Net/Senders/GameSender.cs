@@ -212,6 +212,45 @@ public static class GameSender
         return p;
     }
 
+    // ── Quests (UserQuestRequest 119) ─────────────────────────────────────────────
+    // Mirrors kinoko QuestHandler (QuestRequestType: Accept=1 Complete=2 Resign=3).
+
+    // Accept(1): byte type, short questId, int npcTemplateId, int itemPos, short x, short y.
+    public static OutPacket QuestAccept(short questId, int npcId, short x, short y)
+    {
+        var p = OutPacket.Of(InHeader.UserQuestRequest);
+        p.WriteByte(1);
+        p.WriteShort(questId);
+        p.WriteInt(npcId);
+        p.WriteInt(0);          // itemPos
+        p.WriteShort(x);
+        p.WriteShort(y);
+        return p;
+    }
+
+    // Complete(2): byte type, short questId, int npcTemplateId, int itemPos, short x, short y, int rewardIndex.
+    public static OutPacket QuestComplete(short questId, int npcId, short x, short y, int rewardIndex = 0)
+    {
+        var p = OutPacket.Of(InHeader.UserQuestRequest);
+        p.WriteByte(2);
+        p.WriteShort(questId);
+        p.WriteInt(npcId);
+        p.WriteInt(0);          // itemPos
+        p.WriteShort(x);
+        p.WriteShort(y);
+        p.WriteInt(rewardIndex);
+        return p;
+    }
+
+    // Resign(3): byte type, short questId.
+    public static OutPacket QuestResign(short questId)
+    {
+        var p = OutPacket.Of(InHeader.UserQuestRequest);
+        p.WriteByte(3);
+        p.WriteShort(questId);
+        return p;
+    }
+
     // UserSelectNpc(63): int objectId, short userX, short userY
     // (upstream UserHandler.handleUserSelectNpc reads the player's position).
     public static OutPacket UserSelectNpc(int npcObjId, short userX, short userY)
