@@ -212,6 +212,69 @@ public static class GameSender
         return p;
     }
 
+    // ── Player storage / trunk (UserTrunkRequest 67) ──────────────────────────────
+    // Mirrors kinoko TrunkDialog.handlePacket (TrunkRequestType: GetItem=4 PutItem=5
+    // SortItem=6 Money=7 CloseDialog=8). Opening is server-initiated — the server
+    // sends TrunkResult/OpenTrunkDlg after the player talks to a storage NPC.
+
+    // GetItem(4): byte type, byte invType, byte position. Withdraw to inventory.
+    // invType is the InventoryType value (1=Equip 2=Consume 3=Install 4=Etc 5=Cash);
+    // position is the item's index within that type's trunk block.
+    public static OutPacket TrunkWithdraw(byte invType, byte position)
+    {
+        var p = OutPacket.Of(InHeader.UserTrunkRequest);
+        p.WriteByte(4);
+        p.WriteByte(invType);
+        p.WriteByte(position);
+        return p;
+    }
+
+    // PutItem(5): byte type, short pos, int itemId, short quantity. Deposit from
+    // the inventory slot to the trunk.
+    public static OutPacket TrunkDeposit(short inventoryPos, int itemId, short quantity)
+    {
+        var p = OutPacket.Of(InHeader.UserTrunkRequest);
+        p.WriteByte(5);
+        p.WriteShort(inventoryPos);
+        p.WriteInt(itemId);
+        p.WriteShort(quantity);
+        return p;
+    }
+
+    // SortItem(6): byte type, no body.
+    public static OutPacket TrunkSort()
+    {
+        var p = OutPacket.Of(InHeader.UserTrunkRequest);
+        p.WriteByte(6);
+        return p;
+    }
+
+    // Money(7): byte type, int money. Positive withdraws from the trunk to the
+    // inventory; negative deposits from the inventory to the trunk.
+    public static OutPacket TrunkWithdrawMoney(int amount)
+    {
+        var p = OutPacket.Of(InHeader.UserTrunkRequest);
+        p.WriteByte(7);
+        p.WriteInt(amount);
+        return p;
+    }
+
+    public static OutPacket TrunkDepositMoney(int amount)
+    {
+        var p = OutPacket.Of(InHeader.UserTrunkRequest);
+        p.WriteByte(7);
+        p.WriteInt(-amount);
+        return p;
+    }
+
+    // CloseDialog(8): byte type, no body.
+    public static OutPacket TrunkClose()
+    {
+        var p = OutPacket.Of(InHeader.UserTrunkRequest);
+        p.WriteByte(8);
+        return p;
+    }
+
     // ── Quests (UserQuestRequest 119) ─────────────────────────────────────────────
     // Mirrors kinoko QuestHandler (QuestRequestType: Accept=1 Complete=2 Resign=3).
 

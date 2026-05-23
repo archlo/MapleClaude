@@ -86,6 +86,7 @@ public sealed class GameStage : Stage
     // Modal panels
     private NpcTalk? _npcTalk;
     private Shop? _shop;
+    private Trunk? _trunk;
     private Notice? _notice;
     private QuitConfirmOverlay? _quitConfirm;
 
@@ -232,6 +233,13 @@ public sealed class GameStage : Stage
         {
             if (Game.Session.IsConnected) Game.Session.Send(GameSender.ShopClose());
         };
+
+        _trunk = new Trunk(_loader, _ui, font);
+        _trunk.OnWithdraw = (invType, pos) => SendIfConnected(GameSender.TrunkWithdraw(invType, pos));
+        _trunk.OnDeposit  = (pos, itemId, count) => SendIfConnected(GameSender.TrunkDeposit(pos, itemId, count));
+        _trunk.OnSort     = () => SendIfConnected(GameSender.TrunkSort());
+        _trunk.OnClosed   = () => SendIfConnected(GameSender.TrunkClose());
+
         _notice = new Notice(_loader, _ui, font);
 
         _quitConfirm = new QuitConfirmOverlay(_loader, _ui, font, new Vector2(400, 300))
@@ -284,6 +292,7 @@ public sealed class GameStage : Stage
         _panels.Add(_charInfo);
         _panels.Add(_npcTalk);
         _panels.Add(_shop);
+        _panels.Add(_trunk);
         _panels.Add(_notice);
 
         // ── New high-priority panels ─────────────────────────────────────────
@@ -423,6 +432,40 @@ public sealed class GameStage : Stage
             _shop.OpenShop(buy, sell);
         };
         fh.OnShopResult += args => _messenger?.Show(ShopResultText(args), StatusMessenger.MsgColor.White);
+
+        // ── Player storage / trunk ────────────────────────────────────────────
+        fh.OnTrunkResult += args =>
+        {
+            if (_trunk is null) return;
+            switch (args.ResultType)
+            {
+                case 22:   // OpenTrunkDlg
+                case 9:    // GetSuccess
+                case 13:   // PutSuccess
+                case 15:   // SortItem
+                {
+                    var trunkItems = args.Items.Select(it => new Trunk.TrunkItem(
+                        Game.Names.ItemName(it.ItemId) ?? $"Item {it.ItemId:D7}",
+                        it.ItemId, (short)it.Quantity, it.InvType, it.PositionInType)).ToList();
+                    var inv = _item?.AllItems ?? (IReadOnlyList<ItemInventory.InvItem>)Array.Empty<ItemInventory.InvItem>();
+                    var deposit = inv.Select(iv => new Trunk.TrunkItem(
+                        iv.Name, iv.Id, (short)iv.Quantity, 0, iv.Slot)).ToList();
+                    if (args.ResultType == 22) _trunk.Open(args.Money, trunkItems, deposit);
+                    else                       _trunk.Refresh(args.Money, trunkItems, deposit);
+                    break;
+                }
+                case 19:   // MoneySuccess
+                    _trunk.SetMoney(args.Money);
+                    break;
+                case 24:   // ServerMsg
+                    if (!string.IsNullOrEmpty(args.Message))
+                        _messenger?.Show(args.Message, StatusMessenger.MsgColor.White);
+                    break;
+                default:   // failure subtypes (GetNoMoney, PutNoSpace, …)
+                    _messenger?.Show(TrunkResultText(args.ResultType), StatusMessenger.MsgColor.White);
+                    break;
+            }
+        };
 
         // ── Quests ────────────────────────────────────────────────────────────
         fh.OnQuestRecord += a =>
@@ -1046,6 +1089,20 @@ public sealed class GameStage : Stage
         17 => "You can't trade this item.",
         19 => a.Message ?? string.Empty,
         _  => "The transaction could not be completed.",
+    };
+
+    // TrunkResultType (kinoko) failure subtypes → a player-facing line.
+    private static string TrunkResultText(byte resultType) => resultType switch
+    {
+        10 => "You can't take that item out.",      // GetUnknown
+        11 => "You don't have enough mesos.",        // GetNoMoney
+        12 => "You can only take out mesos.",        // GetHavingOnlyItem
+        14 => "That request can't be completed.",    // PutIncorrectRequest
+        16 => "You don't have enough mesos.",        // PutNoMoney
+        17 => "Your storage is full.",               // PutNoSpace
+        18 => "You can't store that item.",          // PutUnknown
+        23 => "Trading is blocked.",                 // TradeBlocked
+        _  => "The storage request could not be completed.",
     };
 
     // DropPickUp warning subtypes (kinoko MessagePacket.DropPickUpMessageType):

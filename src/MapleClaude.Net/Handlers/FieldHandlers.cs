@@ -82,6 +82,9 @@ public sealed class FieldHandlers
     public event Action<ShopOpenArgs>?          OnShopOpen;
     public event Action<ShopResultArgs>?        OnShopResult;
 
+    // ── Player storage / trunk ──────────────────────────────────────────────────
+    public event Action<TrunkResultArgs>?       OnTrunkResult;
+
     // ── Quests ────────────────────────────────────────────────────────────────────
     /// <summary>A quest record changed (Message QuestRecord / QuestRecordEx).</summary>
     public event Action<QuestRecordArgs>?       OnQuestRecord;
@@ -141,6 +144,7 @@ public sealed class FieldHandlers
         OnScriptMessage       = null;
         OnShopOpen            = null;
         OnShopResult          = null;
+        OnTrunkResult         = null;
         OnQuestRecord         = null;
         OnSkillRecordResult   = null;
         OnTemporaryStatSet    = null;
@@ -178,6 +182,7 @@ public sealed class FieldHandlers
         router.Register(OutHeader.ScriptMessage,       (p, s) => HandleScriptMessage(p));
         router.Register(OutHeader.OpenShopDlg,         (p, s) => HandleOpenShopDlg(p));
         router.Register(OutHeader.ShopResult,          (p, s) => HandleShopResult(p));
+        router.Register(OutHeader.TrunkResult,         (p, s) => HandleTrunkResult(p));
         router.Register(OutHeader.FuncKeyMappedInit,   (p, s) => HandleFuncKeyMappedInit(p));
         router.Register(OutHeader.FootHoldInfo,        (p, s) => HandleFootHoldInfo(p));
         router.Register(OutHeader.ChangeSkillRecordResult, (p, s) => HandleChangeSkillRecord(p));
@@ -1239,6 +1244,73 @@ public sealed class FieldHandlers
         catch (Exception) { /* trailing fields are best-effort */ }
         OnShopResult?.Invoke(args);
     }
+
+    // ── Player storage / trunk ────────────────────────────────────────────────────
+    // TrunkResult(368): byte resultType, then per TrunkResultType:
+    //   OpenTrunkDlg(22): int templateId + Trunk.encode
+    //   GetSuccess(9)/PutSuccess(13)/SortItem(15)/MoneySuccess(19): Trunk.encode(Items)
+    //   ServerMsg(24): bool hasMsg + string. Others carry no body.
+    // Trunk.encodeItems: byte slotCount, long dbcharFlag, [MONEY→int money],
+    //   then per inventory type bit set in the flag: byte count + count×Item.encode.
+    private void HandleTrunkResult(InPacket p)
+    {
+        var resultType = p.ReadByte();
+        var args = new TrunkResultArgs { ResultType = resultType };
+        try
+        {
+            switch (resultType)
+            {
+                case 22:                       // OpenTrunkDlg
+                    args.TemplateId = p.ReadInt();
+                    DecodeTrunk(p, args);
+                    break;
+                case 9:                        // GetSuccess
+                case 13:                       // PutSuccess
+                case 15:                       // SortItem
+                case 19:                       // MoneySuccess (flag = MONEY only)
+                    DecodeTrunk(p, args);
+                    break;
+                case 24:                       // ServerMsg
+                    if (p.ReadBool()) args.Message = p.ReadString();
+                    break;
+                default:
+                    break;                     // failure subtypes carry no body
+            }
+        }
+        catch (Exception) { /* trailing fields are best-effort */ }
+        OnTrunkResult?.Invoke(args);
+    }
+
+    // DBChar flag bits (MONEY=0x2; item slots 0x4..0x40) drive which sections follow.
+    private static void DecodeTrunk(InPacket p, TrunkResultArgs args)
+    {
+        args.HasContents = true;
+        args.SlotCount = p.ReadByte();
+        var flag = p.ReadLong();
+        if ((flag & 0x2L) != 0) args.Money = p.ReadInt();
+        ReadTrunkBlock(p, flag, 0x4L,  invType: 1, args);  // EQUIP
+        ReadTrunkBlock(p, flag, 0x8L,  invType: 2, args);  // CONSUME
+        ReadTrunkBlock(p, flag, 0x10L, invType: 3, args);  // INSTALL
+        ReadTrunkBlock(p, flag, 0x20L, invType: 4, args);  // ETC
+        ReadTrunkBlock(p, flag, 0x40L, invType: 5, args);  // CASH
+    }
+
+    private static void ReadTrunkBlock(InPacket p, long flag, long bit, byte invType, TrunkResultArgs args)
+    {
+        if ((flag & bit) == 0) return;
+        int count = p.ReadByte();
+        for (var i = 0; i < count; i++)
+        {
+            var item = ItemDecoder.Decode(p);
+            args.Items.Add(new TrunkItemArg
+            {
+                InvType = invType,
+                PositionInType = i,        // index within this type's block → GetItem position
+                ItemId = item.ItemId,
+                Quantity = item.Quantity == 0 ? 1 : item.Quantity,  // equips/pets have no bundle qty
+            });
+        }
+    }
 }
 
 // ── Argument types ────────────────────────────────────────────────────────────
@@ -1360,6 +1432,25 @@ public sealed class ShopResultArgs
     public byte    ResultType;
     public int     Level;
     public string? Message;
+}
+
+public sealed class TrunkResultArgs
+{
+    public byte    ResultType;
+    public int     TemplateId;            // OpenTrunkDlg only
+    public bool    HasContents;           // true when a trunk listing was decoded
+    public byte    SlotCount;
+    public int     Money;
+    public string? Message;               // ServerMsg only
+    public List<TrunkItemArg> Items = new();
+}
+
+public sealed class TrunkItemArg
+{
+    public byte InvType;                  // 1=Equip 2=Consume 3=Install 4=Etc 5=Cash
+    public int  PositionInType;           // index within the type block → GetItem position
+    public int  ItemId;
+    public int  Quantity;
 }
 
 public sealed class LootMessageArgs

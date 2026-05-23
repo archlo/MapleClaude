@@ -63,6 +63,7 @@ public enum InHeader : short
     UserSelectNpc = 63,
     UserScriptMessageAnswer = 65,
     UserShopRequest = 66,
+    UserTrunkRequest = 67,
     UserGatherItemRequest = 75,
     UserSortItemRequest = 76,
     UserChangeSlotPositionRequest = 77,
@@ -166,4 +167,5 @@ public enum OutHeader : short
     ScriptMessage = 363,
     OpenShopDlg = 364,
     ShopResult = 365,
+    TrunkResult = 368,
 }

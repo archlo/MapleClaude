@@ -330,15 +330,27 @@ result → list refresh); the info buttons give feedback. **Key files:**
 against it. `WorldSelectStage`'s `BtStart`/`BtVAC`/`BtViewChoice` are
 v95-client-only view toggles with no server packet and remain no-ops.
 
-## Phase 19 — NPC shops & storage
+## Phase 19 — NPC shops & storage (shipped)
 
 **Scope.** NPC shops (`OpenShopDlg`/`ShopResult` decode, `UserShopRequest`
-buy/sell/recharge) driving the `Shop` panel; player storage / trunk
-(`TrunkResult`/`TrunkRequest`).
+buy/sell/recharge) driving the `Shop` panel shipped earlier. Player **storage /
+trunk** is now wired: `UserTrunkRequest(67)` encoders (GetItem/PutItem/SortItem/
+Money/CloseDialog) in `GameSender`, and a `TrunkResult(368)` decoder in
+`FieldHandlers` that parses every contents-bearing subtype (OpenTrunkDlg,
+Get/Put/SortSuccess, MoneySuccess) via the flag-driven `Trunk.encodeItems` shape
+(slotCount, `DBChar` flag, optional money, then per-inventory-type item blocks
+reusing `ItemDecoder`), plus ServerMsg. A new `Trunk` panel (Withdraw/Deposit
+tabs, Sort, meso total) opens on `OpenTrunkDlg` and refreshes on each success;
+`GameStage` wires it to the senders and maps failure subtypes to messenger lines.
 
-**Exit criteria.** Buy/sell at an NPC shop updates inventory + meso; storage
-deposits/withdraws. **Key files:** `UI/Game/Shop.cs`, `Net/Handlers/FieldHandlers.cs`,
+**Exit criteria.** Buy/sell at an NPC shop updates inventory + meso; talking to a
+storage NPC opens the trunk and deposits/withdraws items refresh it. **Key
+files:** `UI/Game/{Shop,Trunk}.cs`, `Net/Handlers/FieldHandlers.cs`,
 `Net/Senders/GameSender.cs`.
+
+**Deferred:** an interactive meso-amount widget for storage (the
+`TrunkWithdrawMoney`/`TrunkDepositMoney` senders exist and are unit-tested; the
+panel currently shows the stored total and the money path is server-verified).
 
 ## Phase 20 — Quests
 
