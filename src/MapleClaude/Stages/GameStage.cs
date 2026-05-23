@@ -1039,6 +1039,9 @@ public sealed class GameStage : Stage
                 "is not yet implemented; controlled mobs will appear frozen to other clients until this is fixed.");
         }
 
+        // Map animation + background autoscroll
+        _field?.Update(dt * 1000.0);
+
         // Drops
         foreach (var drop in _drops.Values) drop.Update(dt);
 

@@ -71,6 +71,56 @@ public sealed class WzTextureLoader : IDisposable
         return sprite;
     }
 
+    /// <summary>
+    /// Builds an <see cref="AnimatedSprite"/> from a WZ node. A bare
+    /// <see cref="WzCanvas"/> becomes a single static frame; a
+    /// <see cref="WzProperty"/> with numbered canvas children (<c>0,1,2…</c>)
+    /// becomes a multi-frame animation, reading each frame's <c>delay</c>
+    /// (default 100 ms). Returns <c>null</c> when no usable frame is found.
+    /// </summary>
+    public AnimatedSprite? LoadAnimation(object? node)
+    {
+        switch (node)
+        {
+            case WzCanvas canvas:
+            {
+                var s = Load(canvas);
+                return s is null ? null : new AnimatedSprite([s], [100]);
+            }
+            case WzProperty prop:
+            {
+                var frames = new List<WzSprite>();
+                var delays = new List<int>();
+                for (var i = 0; ; i++)
+                {
+                    if (prop.Get(i.ToString(System.Globalization.CultureInfo.InvariantCulture)) is not WzCanvas frame)
+                    {
+                        break;
+                    }
+                    var sprite = Load(frame);
+                    if (sprite is null)
+                    {
+                        break;
+                    }
+                    frames.Add(sprite);
+                    var delay = ReadInt(frame.Property.Get("delay"), 100);
+                    delays.Add(delay <= 0 ? 100 : delay);
+                }
+                return frames.Count == 0 ? null : new AnimatedSprite([.. frames], [.. delays]);
+            }
+            default:
+                return null;
+        }
+    }
+
+    private static int ReadInt(object? v, int fallback) => v switch
+    {
+        int i => i,
+        short s => s,
+        long l => (int)l,
+        _ => fallback,
+    };
+
     public void Dispose()
     {
         if (_disposed)
