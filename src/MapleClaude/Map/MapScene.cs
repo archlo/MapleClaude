@@ -14,7 +14,7 @@ namespace MapleClaude.Map;
 /// Phase 1 scope:
 /// <list type="bullet">
 ///   <item>Only static backdrop sprites — no scrolling, no animation frames beyond frame 0.</item>
-///   <item>Only layer 0 obj sprites — no layers 1-7, no tiles, no foothold/portal/etc.</item>
+///   <item>Obj sprites from layers 0-7 (tiles, foothold, portal, etc. still skipped).</item>
 ///   <item>BackType.Normal positions sprite at (Bg.X, Bg.Y) + camera offset.</item>
 ///   <item>BackType.HTiled / VTiled / Tiled repeat the sprite across the screen.</item>
 ///   <item>BackType.HMove* / VMove* render once (no scroll yet).</item>
@@ -28,7 +28,7 @@ public sealed class MapScene
 
     private readonly List<(BackInfo Info, WzSprite? Sprite)> _backgrounds = new();
     private readonly List<(BackInfo Info, WzSprite? Sprite)> _foregrounds = new();
-    private readonly List<(ObjInfo Info, WzSprite? Sprite)> _layer0Objects = new();
+    private readonly List<(int Layer, ObjInfo Info, WzSprite? Sprite)> _objects = new();
 
     /// <summary>BGM path from the map's <c>info/bgm</c> property (e.g. <c>"BgmUI/Title"</c>).</summary>
     public string? BgmPath { get; private set; }
@@ -105,11 +105,17 @@ public sealed class MapScene
                 _backgrounds.Count, _foregrounds.Count, BgmPath);
         }
 
-        // Layer 0 objects (the production logo + animated mascots live here on login)
-        if (mapRoot.Get("0") is WzProperty layer0
-            && layer0.Get("obj") is WzProperty objRoot)
+        // Object layers 0-7. The login map keeps the production logo + mascots on
+        // layer 0, but the world/char-select signboards and their decorations live
+        // on higher layers — load them all so the scrolling map renders natively.
+        for (var layerIdx = 0; layerIdx < 8; layerIdx++)
         {
-            foreach (var (key, value) in objRoot.Items)
+            if (mapRoot.Get(layerIdx.ToString(System.Globalization.CultureInfo.InvariantCulture)) is not WzProperty layer
+                || layer.Get("obj") is not WzProperty objRoot)
+            {
+                continue;
+            }
+            foreach (var (_, value) in objRoot.Items)
             {
                 if (value is not WzProperty entry)
                 {
@@ -117,11 +123,24 @@ public sealed class MapScene
                 }
                 var obj = ObjInfo.From(entry);
                 var sprite = LoadObjSprite(obj);
-                _layer0Objects.Add((obj, sprite));
+                if (sprite is null)
+                {
+                    continue;
+                }
+                // Skip full-screen chrome/promo objects: the per-step Common/frame
+                // (drawn as a centred UI overlay) and seasonal event splashes
+                // (e.g. WorldSelect/dual, an 800x576 banner) the client gates by
+                // condition. Scene props like the signboards (<=605 wide) stay.
+                if (sprite.Width >= 700 || sprite.Height >= 500)
+                {
+                    continue;
+                }
+                _objects.Add((layerIdx, obj, sprite));
             }
-            _layer0Objects.Sort((a, b) => a.Info.Z.CompareTo(b.Info.Z));
-            _logger.LogInformation("Map scene layer 0 loaded {ObjCount} objects", _layer0Objects.Count);
         }
+        // Draw order: lower layer first, then per-object z within a layer.
+        _objects.Sort((a, b) => a.Layer != b.Layer ? a.Layer.CompareTo(b.Layer) : a.Info.Z.CompareTo(b.Info.Z));
+        _logger.LogInformation("Map scene loaded {ObjCount} objects across layers 0-7", _objects.Count);
     }
 
     public void Draw(SpriteBatch sb, Texture2D fillTexture, int screenWidth, int screenHeight)
@@ -134,15 +153,14 @@ public sealed class MapScene
             DrawBackEntry(sb, info, sprite, screenCenter, screenWidth, screenHeight);
         }
 
-        // Layer 0 obj — the MapleStory logo, characters, etc.
-        foreach (var (info, sprite) in _layer0Objects)
+        // Object layers (logo, mascots, world/char-select signboards + decorations).
+        foreach (var (_, info, sprite) in _objects)
         {
             if (sprite == null)
             {
                 continue;
             }
-            var pos = ObjMapToScreen(info, screenCenter);
-            sprite.Draw(sb, pos);
+            sprite.Draw(sb, ObjMapToScreen(info, screenCenter));
         }
 
         // Foregrounds (in front of world)
@@ -165,6 +183,15 @@ public sealed class MapScene
         var y = obj.Y + screenCenter.Y - Camera.Y;
         return new Vector2(x, y);
     }
+
+    /// <summary>
+    /// Maps a world/map coordinate to screen space using the current camera — the
+    /// same transform the scene uses for objects. Stages position map-space widgets
+    /// (e.g. the world-select buttons that sit on the signboard) with this so they
+    /// stay aligned with map objects regardless of scroll.
+    /// </summary>
+    public Vector2 WorldToScreen(Vector2 mapPos, int screenWidth, int screenHeight) =>
+        new(mapPos.X + screenWidth / 2f - Camera.X, mapPos.Y + screenHeight / 2f - Camera.Y);
 
     private void DrawBackEntry(SpriteBatch sb, BackInfo info, WzSprite? sprite, Vector2 screenCenter, int screenWidth, int screenHeight)
     {

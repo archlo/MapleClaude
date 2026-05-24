@@ -13,21 +13,43 @@ using Microsoft.Xna.Framework.Graphics;
 namespace MapleClaude.Stages;
 
 /// <summary>
-/// World/server-select screen (UI placeholder, no packet exchange yet).
-/// Two sub-screens:
+/// World/server-select screen. Two sub-screens:
 /// <list type="bullet">
-///   <item><b>WorldList</b> — the v95 world button row + start / VAC /
-///     view-choice / notice banner. Clicking a world plays a click SFX
-///     and switches to ChannelGrid.</item>
-///   <item><b>ChannelGrid</b> — the channel selector overlay (5×4 grid
-///     of channel buttons, world icon, population gauge, scroll bar,
-///     go-world button). Backspace returns to WorldList.</item>
+///   <item><b>WorldList</b> — the v95 world-button grid. The server's worlds are
+///     laid out in a 6-column grid (cell step 96×26) as the original v95 client
+///     does, each slot drawing <c>WorldSelect/BtWorld/&lt;worldId&gt;</c> with an
+///     optional world-state flag overlaid at (+78, +6).</item>
+///   <item><b>ChannelGrid</b> — the channel selector panel (<c>chBackgrn</c>,
+///     371×222). Channels are a 5-column grid; cell rect is
+///     <c>left = 66·(i%5)+23, top = 29·(i/5)+93</c> (61×21). The go-world button
+///     sits at (230, 43) inside the panel.</item>
 /// </list>
-/// Backspace from WorldList returns to <see cref="LoginStage"/>.
+/// All layout offsets below are the authentic v95 client values; only the two
+/// panel anchors (screen-space) are tunable via the debug window.
 /// </summary>
 public sealed class WorldSelectStage : Stage
 {
     private enum SubScreen { WorldList, ChannelGrid }
+
+    // ---- Authentic v95 layout constants (world select / channel select) ----
+    private const int WorldGridCols = 6;                       // 96·(i%6), 26·(i/6)
+    private static readonly Vector2 WorldGridStep = new(96, 26);
+    // World-state flag offset from a world button. The flag draws on the world-info
+    // layer (itself at dialog + RelMove(-10,-10)) at (+78,+6) per slot, i.e. (+68,-4)
+    // relative to the button. Per CUIWorldSelect::DrawWorldItems (IDA-verified).
+    private static readonly Vector2 WorldFlagOffset = new(68, -4);
+    // World-button 0 in login-MAP coordinates. The buttons are direct children of the
+    // CUIWorldSelect dialog (CreateDlg(-249,-862), bScreenCoord=0): CCtrlWnd::CreateCtrl
+    // places each at (96·col, 26·row) relative to the dialog's own layer, so button 0 is
+    // the dialog's top-left. (The RelMove(-10,-10) in OnCreate offsets the separate
+    // world-state-icon layer, NOT the buttons.) The signboard sits at map (31,-808) in
+    // the same space, so the buttons land on the board via the camera.
+    private static readonly Vector2 WorldGridOriginMap = new(-249, -862);
+    private const int ChannelGridCols = 5;                     // 66·(i%5)+23, 29·(i/5)+93
+    private static readonly Vector2 ChannelGridBase = new(23, 93);
+    private static readonly Vector2 ChannelGridStep = new(66, 29);
+    private static readonly Point ChannelCellSize = new(61, 21);
+    private static readonly Vector2 GoWorldOffset = new(230, 43);
 
     private readonly ILogger<WorldSelectStage> _logger;
     private readonly ILoggerFactory _loggerFactory;
@@ -43,62 +65,47 @@ public sealed class WorldSelectStage : Stage
     private int _selectedWorldId;
     private int _selectedChannelId;
 
-    // ---- Network ----
+    // ---- Network state ----
     private string _statusLabel = "Loading worlds...";
+    private readonly List<WorldInfo> _worlds = new();
+    private bool _worldsDirty;
 
     // ---- Camera + scroll ----
     private Vector2 _cameraOffset;
     private float _scrollT;
-    // 0.55 s — fast enough to feel like a real scroll, slow enough that the
-    // motion registers visually. Tuned by feel.
     private const float ScrollDuration = 0.55f;
 
-    // ---- WorldList layer assets ----
-    private WzSprite? _commonFrame;
+    // ---- Shared chrome ----
+    private WzSprite? _frame;
     private WzSprite? _stepIndicator;
-    private WzSprite? _worldNotice;
-    private Button? _btWorld0;
-    private Button? _btWorldE;
-    private Button? _btStart;
-    private Button? _btVAC;
-    private Button? _btViewChoice;
+    private WzSprite? _selectWorldTitle;
+
+    // ---- WorldList layer assets ----
+    // The board the world list sits on (Map/Obj/login.img/WorldSelect/signboard) and
+    // the world decorations are rendered natively by MapScene from the login map's
+    // object layers — the world buttons below are placed in the same map space.
+    private readonly List<Button> _worldButtons = new();
+    private readonly List<WzSprite?> _worldFlags = new();
+    private Button? _btExit;   // back to title/login (Common/BtExit; client's GotoTitle)
 
     // ---- ChannelGrid layer assets ----
     private WzSprite? _chBackgrn;
-    private WzSprite? _chSelect;
-    private WzSprite? _worldIcon;
+    private AnimatedSprite? _chSelect;
+    private WzSprite? _worldBanner;
     private WzSprite? _chGauge;
-    private WzSprite? _chScroll;
     private Button? _btGoWorld;
-    private readonly WzSprite?[] _channelSprites = new WzSprite?[20];
+    private readonly WzSprite?[] _channelNormal = new WzSprite?[20];
+    private readonly WzSprite?[] _channelDisabled = new WzSprite?[20];
 
-    // ---- WorldList layout tunables (screen-space; debug-window editable) ----
-    private Vector2 _worldNoticePos = new(400, 50);
-    private Vector2 _btWorld0Pos = new(320, 280);
-    private Vector2 _btWorldEPos = new(440, 280);
-    private Vector2 _btStartPos = new(400, 510);
-    private Vector2 _btVACPos = new(700, 80);
-    private Vector2 _btViewChoicePos = new(620, 80);
-
-    // ---- ChannelGrid layout tunables ----
-    // The chBackgrn panel is 448 × 233 in v95; centred on the 800 × 600
-    // backbuffer that places its top-left at (176, 184). Element positions
-    // below derive from the v95 reference layout where known:
-    //   - Channel grid:  base (23, 93) inside the panel; step (66, 29);
-    //                    5 columns × 4 rows for 20 channels.
-    //   - BtGoworld:     (230, 43) inside the panel.
-    //   - chgauge / world name draw at (260, 10) inside the panel.
-    // Anything not pulled from the reference is a sensible guess and can
-    // be tuned live via the debug window (drag-mode in screen space).
-    private Vector2 _chBackgrnPos = new(400, 300);     // panel centre on 800×600
-    private Vector2 _chSelectPos = new(400, 200);
-    private Vector2 _worldIconPos = new(400, 220);
-    private Vector2 _chGaugePos = new(436, 194);       // chBackgrn TL + (260, 10)
-    private Vector2 _chScrollPos = new(580, 300);
-    private Vector2 _btGoWorldPos = new(406, 227);     // chBackgrn TL + (230, 43)
-    private Vector2 _channelGridBase = new(199, 277);  // chBackgrn TL + (23, 93)
-    private Vector2 _channelGridStep = new(66, 29);    // 66 px column, 29 px row
-    private const int GridCols = 5;                    // 5 cols × 4 rows = 20 channels
+    // ---- Tunable knobs (debug-window editable) ----
+    // World buttons are placed at WorldGridOriginMap in login-map space; this nudge
+    // (map units) is only for fine adjustment — default 0 (authentic).
+    private Vector2 _worldGridNudge = Vector2.Zero;
+    private Vector2 _channelPanelAnchor = new(214, 189); // (800-371)/2, (600-222)/2
+    private Vector2 _worldBannerOffset = new(12, 6);      // world banner inside panel
+    private Vector2 _chSelectOffset = new(-2, -3);        // highlight centred over cell
+    private Vector2 _chGaugeOffset = new(2, 15);          // gauge inside cell
+    private Vector2 _btExitPos = new(0, 546);             // BtExit screen-space, CUILoginStart (0,546)
 
     public WorldSelectStage(
         ILogger<WorldSelectStage> logger,
@@ -115,8 +122,6 @@ public sealed class WorldSelectStage : Stage
         _map = map;
         _sound = sound;
         _cameraStart = cameraStart;
-        // Inherit X from the user-tuned login camera; default Y scrolls up
-        // by roughly one screen height. User can re-tune via debug.
         _cameraOffset = new Vector2(loginCameraOffset.X, -608);
     }
 
@@ -139,38 +144,19 @@ public sealed class WorldSelectStage : Stage
             _scene.Camera = _cameraStart;
         }
 
-        _commonFrame = LoadCanvas("Login.img/Common/frame");
+        _frame = LoadCanvas("Login.img/Common/frame");
         _stepIndicator = LoadCanvas("Login.img/Common/step/1");
-        _worldNotice = LoadCanvas("Login.img/WorldNotice");
+        _selectWorldTitle = LoadCanvas("Login.img/Common/selectWorld");
+        _btExit = MakeButton("Login.img/Common/BtExit", GoBackToLogin);
 
-        _btWorld0 = MakeButton("Login.img/WorldSelect/BtWorld/0",
-            () => OnWorldClicked(0));
-        _btWorldE = MakeButton("Login.img/WorldSelect/BtWorld/e", () => { });
-        if (_btWorldE != null)
-        {
-            _btWorldE.Enabled = false; // user manifest lists only e/disabled — render as disabled
-        }
-        _btStart = MakeButton("Login.img/Common/BtStart",
-            () => _logger.LogInformation("BtStart clicked (no-op placeholder)"));
-        if (_btStart != null)
-        {
-            _btStart.Enabled = false; // no world picked yet
-        }
-        _btVAC = MakeButton("Login.img/ViewAllChar/BtVAC",
-            () => _logger.LogInformation("BtVAC (View All Char) clicked (no-op placeholder)"));
-        _btViewChoice = MakeButton("Login.img/WorldSelect/BtViewChoice",
-            () => _logger.LogInformation("BtViewChoice clicked (no-op placeholder)"));
-
-        ApplyLayout();
         RegisterDebugItems();
 
         Game.LoginHandlers.OnWorldListComplete += OnWorldListComplete;
         Game.LoginHandlers.OnSelectWorldResult += OnSelectWorldResult;
         Game.Session.Disconnected += OnDisconnected;
 
-        // Send WorldInfoRequest(4) — server replies with one WorldInformation per world.
-        var p = OutPacket.Of(InHeader.WorldInfoRequest);
-        Game.Session.Send(p);
+        // WorldInfoRequest(4) — server replies with one WorldInformation per world.
+        Game.Session.Send(OutPacket.Of(InHeader.WorldInfoRequest));
 
         _logger.LogInformation(
             "WorldSelectStage entered — scrolling from {Start} to SP + {Offset}",
@@ -190,17 +176,11 @@ public sealed class WorldSelectStage : Stage
 
     private void OnWorldListComplete(List<WorldInfo> worlds)
     {
-        _logger.LogInformation("World list ready: {N} worlds", worlds.Count);
+        _worlds.Clear();
+        _worlds.AddRange(worlds);
+        _worldsDirty = true; // rebuild buttons on the game thread in Update
         _statusLabel = worlds.Count == 0 ? "No worlds available." : string.Empty;
-        // The v95 asset set only ships BtWorld/0 + BtWorld/e (a disabled stub),
-        // and we render BtWorld/0 for the first available world. We don't try
-        // to render N world buttons dynamically — the GMS v95 client did the
-        // same (one custom world button per supported world, with disabled
-        // placeholders for the rest).
-        if (worlds.Count > 0 && _btStart != null)
-        {
-            _btStart.Enabled = false;  // still need to pick channel first
-        }
+        _logger.LogInformation("World list ready: {N} worlds", worlds.Count);
     }
 
     private void OnSelectWorldResult(SelectWorldResultArgs args)
@@ -211,8 +191,6 @@ public sealed class WorldSelectStage : Stage
             return;
         }
         _statusLabel = $"Character list: {args.Characters.Count} characters.";
-        // Hand the live character list off to the session so CharSelectStage
-        // can pull it from there (it already lives on session.Characters).
         Game.Session.Characters.Clear();
         Game.Session.Characters.AddRange(args.Characters);
         Game.StageDirector.Replace(new CharSelectStage(
@@ -230,15 +208,22 @@ public sealed class WorldSelectStage : Stage
 
     public override void Update(GameTime gameTime)
     {
-        if (_scene is null)
+        if (_worldsDirty)
         {
-            return;
+            BuildWorldButtons();
+            _worldsDirty = false;
         }
+
         var dt = (float)gameTime.ElapsedGameTime.TotalSeconds;
-        _scrollT = Math.Min(1f, _scrollT + dt / ScrollDuration);
-        var sp = _scene.StartPoint ?? Vector2.Zero;
-        var target = sp + _cameraOffset;
-        _scene.Camera = Vector2.Lerp(_cameraStart, target, SmoothStep(_scrollT));
+        _chSelect?.Update(gameTime.ElapsedGameTime.TotalMilliseconds);
+
+        if (_scene is not null)
+        {
+            _scrollT = Math.Min(1f, _scrollT + dt / ScrollDuration);
+            var sp = _scene.StartPoint ?? Vector2.Zero;
+            var target = sp + _cameraOffset;
+            _scene.Camera = Vector2.Lerp(_cameraStart, target, SmoothStep(_scrollT));
+        }
 
         ApplyLayout();
     }
@@ -257,8 +242,10 @@ public sealed class WorldSelectStage : Stage
         {
             spriteBatch.Draw(Game.WhitePixel, pp.Bounds, new Color(10, 16, 36));
         }
-        _commonFrame?.Draw(spriteBatch, new Vector2(w / 2f, h / 2f));
+
+        _frame?.Draw(spriteBatch, new Vector2(w / 2f, h / 2f));
         _stepIndicator?.Draw(spriteBatch, new Vector2(72, 50));
+        _selectWorldTitle?.Draw(spriteBatch, new Vector2(w / 2f - 46, 26));
 
         if (_subScreen == SubScreen.WorldList)
         {
@@ -271,49 +258,73 @@ public sealed class WorldSelectStage : Stage
 
         if (!string.IsNullOrEmpty(_statusLabel) && Game.Font is not null)
         {
-            var font = Game.Font;
-            var size = font.Measure(_statusLabel);
-            font.Draw(spriteBatch, _statusLabel,
+            var size = Game.Font.Measure(_statusLabel);
+            Game.Font.Draw(spriteBatch, _statusLabel,
                 new Vector2(w / 2f - size.X / 2f, h - 30), Color.White);
         }
     }
 
     private void DrawWorldList(SpriteBatch sb)
     {
-        _worldNotice?.Draw(sb, _worldNoticePos);
-        _btWorld0?.Draw(sb);
-        _btWorldE?.Draw(sb);
-        _btStart?.Draw(sb);
-        _btVAC?.Draw(sb);
-        _btViewChoice?.Draw(sb);
+        // The signboard + world decorations are drawn by MapScene (login-map obj layers).
+        for (var i = 0; i < _worldButtons.Count; i++)
+        {
+            _worldButtons[i].Draw(sb);
+            var flag = i < _worldFlags.Count ? _worldFlags[i] : null;
+            flag?.Draw(sb, _worldButtons[i].Position + WorldFlagOffset);
+        }
+        _btExit?.Draw(sb);
     }
 
     private void DrawChannelGrid(SpriteBatch sb)
     {
-        // Dim the world list behind the panel for focus.
         var pp = GraphicsDevice.PresentationParameters;
         sb.Draw(Game.WhitePixel, pp.Bounds, new Color(0, 0, 0, 96));
 
-        _chBackgrn?.Draw(sb, _chBackgrnPos);
-        _chSelect?.Draw(sb, _chSelectPos);
-        _worldIcon?.Draw(sb, _worldIconPos);
-        _chGauge?.Draw(sb, _chGaugePos);
-        _chScroll?.Draw(sb, _chScrollPos);
+        _chBackgrn?.Draw(sb, _channelPanelAnchor);
+        _worldBanner?.Draw(sb, _channelPanelAnchor + _worldBannerOffset);
 
-        for (var i = 0; i < _channelSprites.Length; i++)
+        var channelCount = SelectedWorld?.Channels.Count ?? 0;
+        var maxUsers = MaxChannelUsers();
+
+        for (var i = 0; i < _channelNormal.Length; i++)
         {
-            var sprite = _channelSprites[i];
+            var enabled = i < channelCount;
+            var sprite = enabled ? _channelNormal[i] : _channelDisabled[i];
             if (sprite is null)
             {
                 continue;
             }
-            var col = i % GridCols;
-            var row = i / GridCols;
-            var pos = _channelGridBase + new Vector2(col * _channelGridStep.X, row * _channelGridStep.Y);
-            sprite.Draw(sb, pos);
+            var cell = ChannelCellTopLeft(i);
+            sprite.Draw(sb, cell);
+
+            if (enabled)
+            {
+                DrawGauge(sb, cell + _chGaugeOffset, ChannelUsers(i), maxUsers);
+                if (i == _selectedChannelId)
+                {
+                    _chSelect?.Draw(sb, cell + _chSelectOffset);
+                }
+            }
         }
 
         _btGoWorld?.Draw(sb);
+    }
+
+    private void DrawGauge(SpriteBatch sb, Vector2 pos, int users, int maxUsers)
+    {
+        if (_chGauge is null)
+        {
+            return;
+        }
+        var frac = maxUsers <= 0 ? 0f : Math.Clamp(users / (float)maxUsers, 0f, 1f);
+        var fillW = (int)(_chGauge.Width * frac);
+        if (fillW <= 0)
+        {
+            return;
+        }
+        var src = new Rectangle(0, 0, fillW, _chGauge.Height);
+        sb.Draw(_chGauge.Texture, pos - _chGauge.Origin, src, Color.White);
     }
 
     public override void OnMouseButton(int x, int y, bool down, MouseButton button)
@@ -322,56 +333,38 @@ public sealed class WorldSelectStage : Stage
         {
             return;
         }
+
         if (_subScreen == SubScreen.WorldList)
         {
-            if (_btWorld0?.HandleMouseButton(x, y, down) == true)
+            if (_btExit?.HandleMouseButton(x, y, down) == true)
             {
                 return;
             }
-            if (_btWorldE?.HandleMouseButton(x, y, down) == true)
+            foreach (var bt in _worldButtons)
             {
-                return;
-            }
-            if (_btStart?.HandleMouseButton(x, y, down) == true)
-            {
-                return;
-            }
-            if (_btVAC?.HandleMouseButton(x, y, down) == true)
-            {
-                return;
-            }
-            if (_btViewChoice?.HandleMouseButton(x, y, down) == true)
-            {
-                return;
-            }
-        }
-        else
-        {
-            if (_btGoWorld?.HandleMouseButton(x, y, down) == true)
-            {
-                return;
-            }
-            // Channel cells (clickable; enabled 0..4 per asset manifest).
-            if (down)
-            {
-                for (var i = 0; i < 5; i++)
+                if (bt.HandleMouseButton(x, y, down))
                 {
-                    var sprite = _channelSprites[i];
-                    if (sprite is null)
-                    {
-                        continue;
-                    }
-                    var col = i % GridCols;
-                    var row = i / GridCols;
-                    var pos = _channelGridBase + new Vector2(col * _channelGridStep.X, row * _channelGridStep.Y);
-                    var w = sprite.Width;
-                    var h = sprite.Height;
-                    var rect = new Rectangle((int)pos.X, (int)pos.Y, w, h);
-                    if (rect.Contains(x, y))
-                    {
-                        OnChannelPicked((byte)i);
-                        return;
-                    }
+                    return;
+                }
+            }
+            return;
+        }
+
+        if (_btGoWorld?.HandleMouseButton(x, y, down) == true)
+        {
+            return;
+        }
+        if (down)
+        {
+            var channelCount = SelectedWorld?.Channels.Count ?? 0;
+            for (var i = 0; i < channelCount; i++)
+            {
+                var cell = ChannelCellTopLeft(i);
+                var rect = new Rectangle((int)cell.X, (int)cell.Y, ChannelCellSize.X, ChannelCellSize.Y);
+                if (rect.Contains(x, y))
+                {
+                    OnChannelClicked(i);
+                    return;
                 }
             }
         }
@@ -386,95 +379,168 @@ public sealed class WorldSelectStage : Stage
         if (_subScreen == SubScreen.ChannelGrid)
         {
             _subScreen = SubScreen.WorldList;
-            _logger.LogInformation("Backspace pressed — leaving channel grid, back to world list");
+            _logger.LogInformation("Backspace — leaving channel grid, back to world list");
             return;
         }
-        _logger.LogInformation("Backspace pressed — returning to LoginStage");
+        GoBackToLogin();
+    }
+
+    // Back from the world list returns to the title/login screen — the client's
+    // CLogin::GotoTitle path (BtExit click or ESC/Backspace at the base step).
+    private void GoBackToLogin()
+    {
+        _logger.LogInformation("Back — returning to LoginStage (GotoTitle)");
         Game.StageDirector.Replace(new LoginStage(
             _loggerFactory.CreateLogger<LoginStage>(),
             _loggerFactory, _ui, _map, _sound));
     }
 
+    // ---- World list ----
+
+    private void BuildWorldButtons()
+    {
+        if (_loader is null || _ui is null)
+        {
+            return;
+        }
+        _worldButtons.Clear();
+        _worldFlags.Clear();
+
+        foreach (var world in _worlds)
+        {
+            var id = world.WorldId;
+            var worldId = id; // capture for closure
+            var bt = MakeButton($"Login.img/WorldSelect/BtWorld/{id}", () => OnWorldClicked(worldId));
+            if (bt is null)
+            {
+                continue;
+            }
+            _worldButtons.Add(bt);
+            // World-state flag overlay (1=new, 2=hot, 3=event, …); first frame is enough.
+            _worldFlags.Add(world.State > 0
+                ? LoadCanvas($"Login.img/WorldNotice/{world.State}/0")
+                : null);
+        }
+
+        _logger.LogInformation("Built {N} world buttons", _worldButtons.Count);
+    }
+
     private void OnWorldClicked(int worldId)
     {
         _selectedWorldId = worldId;
+        _selectedChannelId = 0;
         _logger.LogInformation("World {WorldId} clicked — opening channel grid", worldId);
-        if (_sound?.GetItem("UI.img/BtMouseClick") is WzSound click)
-        {
-            Game.AudioPlayer.PlayEffect(click);
-        }
+        PlayClick();
         if (!_channelAssetsLoaded)
         {
             LoadChannelAssets();
             _channelAssetsLoaded = true;
         }
+        _worldBanner = LoadCanvas($"Login.img/WorldSelect/world/{worldId}");
         _subScreen = SubScreen.ChannelGrid;
     }
 
-    private void OnChannelPicked(int channelId)
+    // ---- Channel grid ----
+
+    private void OnChannelClicked(int channelId)
     {
+        if (channelId == _selectedChannelId)
+        {
+            EnterWorld(); // second click on the selected channel enters
+            return;
+        }
         _selectedChannelId = channelId;
-        _statusLabel = $"Joining world {_selectedWorldId} ch {channelId}...";
+        PlayClick();
+    }
+
+    private void EnterWorld()
+    {
+        _statusLabel = $"Joining world {_selectedWorldId} ch {_selectedChannelId}...";
         // SelectWorld(5): byte gameStartMode=2, byte worldId, byte channelId, int unk=0.
         var p = OutPacket.Of(InHeader.SelectWorld);
         p.WriteByte(2);
         p.WriteByte((byte)_selectedWorldId);
-        p.WriteByte((byte)channelId);
+        p.WriteByte((byte)_selectedChannelId);
         p.WriteInt(0);
         Game.Session.Send(p);
         Game.Session.Account.SelectedWorldId = (byte)_selectedWorldId;
-        Game.Session.Account.SelectedChannelId = (byte)channelId;
+        Game.Session.Account.SelectedChannelId = (byte)_selectedChannelId;
     }
 
     private void LoadChannelAssets()
     {
         _chBackgrn = LoadCanvas("Login.img/WorldSelect/chBackgrn");
-        _chSelect = LoadCanvas("Login.img/WorldSelect/channel/chSelect");
-        _worldIcon = LoadCanvas("Login.img/WorldSelect/world/0");
         _chGauge = LoadCanvas("Login.img/WorldSelect/channel/chgauge");
-        _chScroll = LoadCanvas("Login.img/WorldSelect/scroll/1");
-        for (var i = 0; i < _channelSprites.Length; i++)
+        _chSelect = _loader?.LoadAnimation(_ui?.GetItem("Login.img/WorldSelect/channel/chSelect"));
+        for (var i = 0; i < _channelNormal.Length; i++)
         {
-            // 0–4 enabled, 5–19 disabled per the v95 manifest the user pasted.
-            var state = i < 5 ? "normal" : "disabled";
-            _channelSprites[i] = LoadCanvas($"Login.img/WorldSelect/channel/{i}/{state}");
+            _channelNormal[i] = LoadCanvas($"Login.img/WorldSelect/channel/{i}/normal");
+            _channelDisabled[i] = LoadCanvas($"Login.img/WorldSelect/channel/{i}/disabled");
         }
-        _btGoWorld = MakeButton("Login.img/WorldSelect/BtGoworld",
-            () => OnChannelPicked(_selectedChannelId));
-        ApplyChannelLayout();
+        _btGoWorld = MakeButton("Login.img/WorldSelect/BtGoworld", EnterWorld);
         _logger.LogInformation("ChannelGrid assets loaded");
     }
 
-    private void ApplyLayout()
+    private Vector2 ChannelCellTopLeft(int idx)
     {
-        if (_btWorld0 != null)
-        {
-            _btWorld0.Position = _btWorld0Pos;
-        }
-        if (_btWorldE != null)
-        {
-            _btWorldE.Position = _btWorldEPos;
-        }
-        if (_btStart != null)
-        {
-            _btStart.Position = _btStartPos;
-        }
-        if (_btVAC != null)
-        {
-            _btVAC.Position = _btVACPos;
-        }
-        if (_btViewChoice != null)
-        {
-            _btViewChoice.Position = _btViewChoicePos;
-        }
-        ApplyChannelLayout();
+        var col = idx % ChannelGridCols;
+        var row = idx / ChannelGridCols;
+        return _channelPanelAnchor + ChannelGridBase
+            + new Vector2(col * ChannelGridStep.X, row * ChannelGridStep.Y);
     }
 
-    private void ApplyChannelLayout()
+    private WorldInfo? SelectedWorld =>
+        _worlds.FirstOrDefault(w => w.WorldId == _selectedWorldId);
+
+    private int ChannelUsers(int idx)
     {
+        var w = SelectedWorld;
+        return w is not null && idx < w.Channels.Count ? w.Channels[idx].UserCount : 0;
+    }
+
+    private int MaxChannelUsers()
+    {
+        var w = SelectedWorld;
+        if (w is null || w.Channels.Count == 0)
+        {
+            return 0;
+        }
+        var max = 0;
+        foreach (var ch in w.Channels)
+        {
+            if (ch.UserCount > max)
+            {
+                max = ch.UserCount;
+            }
+        }
+        return max;
+    }
+
+    // ---- Layout ----
+
+    private void ApplyLayout()
+    {
+        // World buttons live in login-map space and ride the camera, so they sit on
+        // the map-rendered signboard regardless of scroll.
+        if (_scene is not null && _worldButtons.Count > 0)
+        {
+            var pp = GraphicsDevice.PresentationParameters;
+            var origin = WorldGridOriginMap + _worldGridNudge;
+            for (var i = 0; i < _worldButtons.Count; i++)
+            {
+                var col = i % WorldGridCols;
+                var row = i / WorldGridCols;
+                var mapPos = origin + new Vector2(col * WorldGridStep.X, row * WorldGridStep.Y);
+                _worldButtons[i].Position = _scene.WorldToScreen(mapPos, pp.BackBufferWidth, pp.BackBufferHeight);
+            }
+        }
+        if (_btExit != null)
+        {
+            _btExit.Position = _btExitPos;
+        }
         if (_btGoWorld != null)
         {
-            _btGoWorld.Position = _btGoWorldPos;
+            _btGoWorld.Position = _channelPanelAnchor + GoWorldOffset;
         }
     }
 
@@ -487,61 +553,43 @@ public sealed class WorldSelectStage : Stage
     {
         var reg = Game.DebugRegistry;
         reg.Register(new DebugItem(WlCat, "Camera offset (SP +)",
-            () => _cameraOffset, v => _cameraOffset = v)
-        { Draggable = false });
+            () => _cameraOffset, v => _cameraOffset = v) { Draggable = false });
+        reg.Register(new DebugItem(WlCat, "World grid nudge (map)",
+            () => _worldGridNudge, v => _worldGridNudge = v) { Draggable = false });
+        reg.Register(new DebugItem(WlCat, "BtExit (back)",
+            () => _btExitPos, v => _btExitPos = v));
 
-        reg.Register(new DebugItem(WlCat, "WorldNotice",
-            () => _worldNoticePos, v => _worldNoticePos = v));
-        reg.Register(new DebugItem(WlCat, "BtWorld 0",
-            () => _btWorld0Pos, v => _btWorld0Pos = v));
-        reg.Register(new DebugItem(WlCat, "BtWorld e",
-            () => _btWorldEPos, v => _btWorldEPos = v));
-        reg.Register(new DebugItem(WlCat, "BtStart",
-            () => _btStartPos, v => _btStartPos = v));
-        reg.Register(new DebugItem(WlCat, "BtVAC",
-            () => _btVACPos, v => _btVACPos = v));
-        reg.Register(new DebugItem(WlCat, "BtViewChoice",
-            () => _btViewChoicePos, v => _btViewChoicePos = v));
-
-        reg.Register(new DebugItem(ChCat, "chBackgrn",
-            () => _chBackgrnPos, v => _chBackgrnPos = v));
-        reg.Register(new DebugItem(ChCat, "chSelect (title)",
-            () => _chSelectPos, v => _chSelectPos = v));
-        reg.Register(new DebugItem(ChCat, "world icon",
-            () => _worldIconPos, v => _worldIconPos = v));
-        reg.Register(new DebugItem(ChCat, "chgauge",
-            () => _chGaugePos, v => _chGaugePos = v));
-        reg.Register(new DebugItem(ChCat, "scroll/1",
-            () => _chScrollPos, v => _chScrollPos = v));
-        reg.Register(new DebugItem(ChCat, "BtGoworld",
-            () => _btGoWorldPos, v => _btGoWorldPos = v));
-        reg.Register(new DebugItem(ChCat, "Grid base (ch/0)",
-            () => _channelGridBase, v => _channelGridBase = v));
-        reg.Register(new DebugItem(ChCat, "Grid step (col,row)",
-            () => _channelGridStep, v => _channelGridStep = v));
+        reg.Register(new DebugItem(ChCat, "Panel anchor (chBackgrn TL)",
+            () => _channelPanelAnchor, v => _channelPanelAnchor = v));
+        reg.Register(new DebugItem(ChCat, "World banner offset",
+            () => _worldBannerOffset, v => _worldBannerOffset = v));
+        reg.Register(new DebugItem(ChCat, "chSelect offset",
+            () => _chSelectOffset, v => _chSelectOffset = v));
+        reg.Register(new DebugItem(ChCat, "Gauge offset",
+            () => _chGaugeOffset, v => _chGaugeOffset = v));
     }
 
     private void UnregisterDebugItems()
     {
         var reg = Game.DebugRegistry;
         reg.Unregister(WlCat, "Camera offset (SP +)");
-        reg.Unregister(WlCat, "WorldNotice");
-        reg.Unregister(WlCat, "BtWorld 0");
-        reg.Unregister(WlCat, "BtWorld e");
-        reg.Unregister(WlCat, "BtStart");
-        reg.Unregister(WlCat, "BtVAC");
-        reg.Unregister(WlCat, "BtViewChoice");
-        reg.Unregister(ChCat, "chBackgrn");
-        reg.Unregister(ChCat, "chSelect (title)");
-        reg.Unregister(ChCat, "world icon");
-        reg.Unregister(ChCat, "chgauge");
-        reg.Unregister(ChCat, "scroll/1");
-        reg.Unregister(ChCat, "BtGoworld");
-        reg.Unregister(ChCat, "Grid base (ch/0)");
-        reg.Unregister(ChCat, "Grid step (col,row)");
+        reg.Unregister(WlCat, "World grid nudge (map)");
+        reg.Unregister(WlCat, "BtExit (back)");
+        reg.Unregister(ChCat, "Panel anchor (chBackgrn TL)");
+        reg.Unregister(ChCat, "World banner offset");
+        reg.Unregister(ChCat, "chSelect offset");
+        reg.Unregister(ChCat, "Gauge offset");
     }
 
     // ---- Helpers ----
+
+    private void PlayClick()
+    {
+        if (_sound?.GetItem("UI.img/BtMouseClick") is WzSound click)
+        {
+            Game.AudioPlayer.PlayEffect(click);
+        }
+    }
 
     private WzSprite? LoadCanvas(string path)
     {
@@ -560,8 +608,7 @@ public sealed class WorldSelectStage : Stage
     {
         try
         {
-            var root = _ui!.GetItem(path) as WzProperty;
-            if (root is null)
+            if (_ui!.GetItem(path) is not WzProperty root)
             {
                 _logger.LogWarning("WorldSelectStage: missing button property {Path}", path);
                 return null;

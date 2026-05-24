@@ -13,5 +13,6 @@
   </Folder>
   <Folder Name="/tools/">
     <Project Path="tools/gen-opcodes/gen-opcodes.csproj" />
+    <Project Path="tools/wz-ui-dump/wz-ui-dump.csproj" />
   </Folder>
 </Solution>

@@ -1,0 +1,14 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <RootNamespace>MapleClaude.Tools.WzUiDump</RootNamespace>
+    <AssemblyName>wz-ui-dump</AssemblyName>
+    <IsPackable>false</IsPackable>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\MapleClaude.Wz\MapleClaude.Wz.csproj" />
+  </ItemGroup>
+
+</Project>

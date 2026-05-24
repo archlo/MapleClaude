@@ -13,7 +13,11 @@ PR description, commit message, or chat output.
 ## How to resolve a symbol
 
 1. Read the user's `CLAUDE.local.md` to find which reference resources are
-   configured locally and where.
+   configured locally and where. Two kinds may be present: static pseudocode/asm
+   dumps, and/or a live IDA Pro database exposed through an `idalib` MCP server
+   (headless — bind it by opening the local `.i64`, with the IDA GUI closed). When
+   the live database is available, prefer it: it has demangled names and lets you
+   decompile, resolve StringPool ids, and read struct offsets on demand.
 2. If a reference index is configured, use it to resolve the symbol you were
    asked about.
 3. Surface the resolved content **paraphrased**, never as a copy-paste. Frame
