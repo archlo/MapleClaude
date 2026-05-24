@@ -372,6 +372,24 @@ public sealed class WorldSelectStage : Stage
 
     public override void OnKeyPress(Microsoft.Xna.Framework.Input.Keys key)
     {
+        // Enter = confirm: on the world list, pick the first available world (e.g.
+        // Scania) and open its channels; on the channel grid, enter the channel.
+        if (key == Microsoft.Xna.Framework.Input.Keys.Enter)
+        {
+            if (_subScreen == SubScreen.WorldList)
+            {
+                if (_worlds.Count > 0)
+                {
+                    OnWorldClicked(_worlds[0].WorldId);
+                }
+            }
+            else
+            {
+                EnterWorld();
+            }
+            return;
+        }
+
         // ESC and Backspace both go back one level (authentic: ESC → GotoTitle).
         if (key != Microsoft.Xna.Framework.Input.Keys.Back
             && key != Microsoft.Xna.Framework.Input.Keys.Escape)
