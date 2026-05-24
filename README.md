@@ -24,7 +24,7 @@ MapleClaude is a brand-new client written in C# 13 / .NET 10 with MonoGame for r
 | 11 | StringPool: bundled English language pack (`MapleClaude.Localization`), `Game.StringPool` lookup/format service, job names + loot warnings sourced from the pack | shipped |
 | 12 | Display names (String.wz): item/skill/map/mob/npc names + descriptions via a cached `NameService`; wired into inventory, skill book, loot popups, name tags | planned |
 | 13 | Map rendering completeness: tile layers 0–7, object layers 1–7 with cross-layer z-order, multi-frame back/obj animation, parallax (`rx`/`ry`, `HMove`/`VMove`); ladders/ropes, reactors, weather | planned |
-| 14 | Character/avatar fidelity: real Character.wz zmap/vslot z-order, full animation state machine (walk/jump/attack/sit/prone/climb) for self + others, hair/pet/weapon-sticker/cash overlays, CharSelect avatar, consolidate the two char-create stages | planned |
+| 14 | Character/avatar fidelity + login polish: CharSelect renders real avatars (walk1/walk2), consolidated char-create (per-race name screens + forbidden-name check), secondary-password (PIC) register/verify via the v95 soft keyboard, channel grey-out for inactive channels, logout-on-back | shipped |
 | 15 | Skills & buffs depth: Skill.wz icons/max-level/active-passive/MP cost, cooldown timers + UI, per-skill cast animation/effect, full `TemporaryStatSet(31)` buff decode | planned |
 | 16 | Keybinds & quickslots: bind skills/items to keys (`KeyAction` for skill/item/macro), working quickslot bar, drag-to-bind from SkillBook/Inventory, duplicate-binding warning | planned |
 | 17 | In-game presentation: switch to the in-game resolution on map entry (restore on logout), mature the `StatusBar`/HUD to real v95 layout + assets, reflow all panels to the active resolution | planned |
@@ -62,9 +62,11 @@ See `docs/roadmap.md` for the detailed roadmap and `CLAUDE.md` for the contribut
 | `CheckPassword(1)` / `CheckPasswordResult(0)` | C↔S | `src/MapleClaude/Stages/LoginStage.cs`, `src/MapleClaude.Net/Handlers/LoginHandlers.cs` |
 | `WorldInfoRequest(4)` / `WorldInformation(10)` | C↔S | `src/MapleClaude/Stages/WorldSelectStage.cs` |
 | `SelectWorld(5)` / `SelectWorldResult(11)` | C↔S | `src/MapleClaude/Stages/WorldSelectStage.cs` |
-| `CheckDuplicatedID(21)` / `CheckDuplicatedIDResult(13)` | C↔S | `src/MapleClaude/Stages/CharCreateStage.cs` |
-| `CreateNewCharacter(22)` / `CreateNewCharacterResult(14)` | C↔S | `src/MapleClaude/Stages/CharCreateStage.cs` |
+| `CheckDuplicatedID(21)` / `CheckDuplicatedIDResult(13)` | C↔S | `src/MapleClaude/Stages/CharCreationStage.cs` |
+| `CreateNewCharacter(22)` / `CreateNewCharacterResult(14)` | C↔S | `src/MapleClaude/Stages/CharCreationStage.cs` |
 | `SelectCharacter(19)` / `SelectCharacterResult(12)` | C↔S | `src/MapleClaude/Stages/CharSelectStage.cs` |
+| `EnableSPWRequest(28)` / `CheckSPWRequest(29)` / `CheckSPWResult(27)` (secondary password / PIC) | C↔S | `src/MapleClaude/Stages/CharSelectStage.cs` + `src/MapleClaude.Net/Handlers/LoginHandlers.cs` |
+| `LogoutWorld(12)` | C→S | `src/MapleClaude/Stages/CharSelectStage.cs` + `src/MapleClaude.Net/Senders/LoginSender.cs` |
 | `MigrateIn(20)` | C→S | `src/MapleClaude.Net/Session/MigrationCoordinator.cs` |
 | `SetField(141)` | S→C | `src/MapleClaude.Net/Handlers/FieldHandlers.cs` |
 | `UserMove(44)` | C→S | `src/MapleClaude/Stages/FieldStage.cs` + `src/MapleClaude.Net/Packet/MovePathEncoder.cs` |
@@ -153,6 +155,14 @@ dotnet run --project src/MapleClaude
 Open `MapleClaude.slnx` in Visual Studio 2026 for the IDE experience (Debug → Start with F5).
 
 If the title screen loads, your WZ assets are wired correctly. If you can log in and reach the world / character select, the cipher pipeline is working. The Phase 1 finish line is logging `MigrateIn ACK observed — Phase 2 boundary reached` after picking a character — that means the channel handoff worked.
+
+### 6b. Hot-reload dev loop
+
+```powershell
+.\watch.ps1
+```
+
+Runs the client under `dotnet watch run`. Save a C# edit and **method-body changes** (Draw / Update / layout logic) apply to the running game via .NET Hot Reload; **structural changes** (new fields, signatures, types) auto-rebuild and relaunch. No manual close → build → deploy → reopen. The script reads the WZ folder from `MAPLECLAUDE_WZ_DIR` or `.deploy.local` and sets `MAPLECLAUDE_DEBUG=1` so the live layout overlay (§9) is available for dragging positions with zero rebuild.
 
 ### 7. Single `.exe` is the default build output
 

@@ -70,7 +70,7 @@ public sealed class FieldStage : Stage
         _loader = new WzTextureLoader(GraphicsDevice);
         _avatar = new CharacterRenderer(
             _loggerFactory.CreateLogger<CharacterRenderer>(),
-            game.CharacterWz, game.ItemWz, _loader);
+            game.CharacterWz, game.ItemWz, game.BaseWz, _loader);
 
         // KeyConfig — UI panel that also owns the binding map.
         // Loaded without WZ buttons (null ui pkg) so it falls back to drawn keys.

@@ -1,3 +1,4 @@
+using System.Text;
 using MapleClaude.Render;
 using MapleClaude.Wz;
 using Microsoft.Xna.Framework;
@@ -26,6 +27,7 @@ public sealed class LoginNoticeOverlay : Overlay
 
     private string _message = string.Empty;
     private NoticeType _type;
+    private float _autoDismiss;   // seconds left before auto-close (0 = stay until OK/ESC)
 
     public Action? OnOk { get; set; }
     public Action? OnCancel { get; set; }
@@ -50,10 +52,11 @@ public sealed class LoginNoticeOverlay : Overlay
         }
     }
 
-    public void Show(string message, NoticeType type = NoticeType.Ok)
+    public void Show(string message, NoticeType type = NoticeType.Ok, float autoDismissSeconds = 0f)
     {
         _message = message;
         _type = type;
+        _autoDismiss = autoDismissSeconds;
         IsVisible = true;
 
         var ox = _type == NoticeType.OkCancel ? -40f : 0f;
@@ -61,9 +64,31 @@ public sealed class LoginNoticeOverlay : Overlay
         if (_btCancel != null) _btCancel.Position = _center + new Vector2(44, 38);
     }
 
+    public override void Update(GameTime gameTime)
+    {
+        if (!IsVisible || _autoDismiss <= 0f) return;
+        _autoDismiss -= (float)gameTime.ElapsedGameTime.TotalSeconds;
+        if (_autoDismiss <= 0f)
+        {
+            _autoDismiss = 0f;
+            IsVisible = false;
+            OnOk?.Invoke();
+        }
+    }
+
+    // Inner text area; the fallback box adds horizontal padding around this.
+    private const int InnerWidth = 280;
+    private const int PadX = 12;
+
     public override void Draw(SpriteBatch sb, Texture2D white)
     {
         if (!IsVisible) return;
+
+        // Wrap the message to the dialog's inner width so a long notice does not
+        // overflow the bar horizontally; the fallback box then grows to fit.
+        var lines = _font != null ? WrapLines(_font, _message, InnerWidth) : new List<string>();
+        var lineH = _font?.LineHeight ?? 0;
+        var textBlockH = lines.Count * lineH;
 
         if (_background != null)
         {
@@ -71,19 +96,63 @@ public sealed class LoginNoticeOverlay : Overlay
         }
         else
         {
-            var rect = new Rectangle((int)_center.X - 150, (int)_center.Y - 55, 300, 110);
+            var boxW = InnerWidth + PadX * 2;
+            var boxH = Math.Max(110, textBlockH + 80);
+            var rect = new Rectangle((int)_center.X - boxW / 2, (int)_center.Y - boxH / 2, boxW, boxH);
             sb.Draw(white, rect, new Color(0, 0, 0, 210));
             DrawBorder(sb, white, rect, new Color(120, 100, 60));
         }
 
         if (_font != null)
         {
-            var sz = _font.Measure(_message);
-            _font.Draw(sb, _message, _center + new Vector2(-sz.X / 2f, -10), Color.White);
+            // Centre the wrapped block vertically just above the middle, leaving the
+            // lower part of the dialog for the OK/Cancel buttons (at _center.Y + 38).
+            var startY = _center.Y - 8 - textBlockH / 2f;
+            for (var i = 0; i < lines.Count; i++)
+            {
+                var w = _font.Measure(lines[i]).X;
+                _font.Draw(sb, lines[i], new Vector2(_center.X - w / 2f, startY + i * lineH), Color.White);
+            }
         }
 
         _btOk?.Draw(sb);
         if (_type == NoticeType.OkCancel) _btCancel?.Draw(sb);
+    }
+
+    /// <summary>Greedy word-wrap: splits <paramref name="text"/> into lines whose
+    /// rendered width stays within <paramref name="maxWidth"/>. Honours explicit
+    /// newlines; a single word wider than the limit overflows on its own line.</summary>
+    private static List<string> WrapLines(BuiltInFont font, string text, float maxWidth)
+    {
+        var lines = new List<string>();
+        if (string.IsNullOrEmpty(text)) return lines;
+
+        foreach (var paragraph in text.Split('\n'))
+        {
+            var current = new StringBuilder();
+            foreach (var word in paragraph.Split(' '))
+            {
+                if (current.Length == 0)
+                {
+                    current.Append(word);
+                    continue;
+                }
+                var candidate = $"{current} {word}";
+                if (font.Measure(candidate).X > maxWidth)
+                {
+                    lines.Add(current.ToString());
+                    current.Clear();
+                    current.Append(word);
+                }
+                else
+                {
+                    current.Clear();
+                    current.Append(candidate);
+                }
+            }
+            lines.Add(current.ToString());
+        }
+        return lines;
     }
 
     public override bool HandleMouseButton(int x, int y, bool down)

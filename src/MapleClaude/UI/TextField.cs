@@ -21,15 +21,46 @@ public sealed class TextField
     private int _caret;
     private int _selectionStart = -1; // -1 = no selection
     private int _scrollPx;            // pixel offset of the visible text window into the full string
+    private bool _isFocused;
+    private string _composition = string.Empty; // live IME preedit (un-committed) text
+
+    /// <summary>The field that currently has focus, so the IME composition hook can route
+    /// the live preedit string to it without per-stage plumbing. Only one field is focused
+    /// at a time in this single-window client.</summary>
+    internal static TextField? Active { get; private set; }
 
     public Vector2 Position { get; set; }
     public int Width { get; set; } = 160;
     public int Height { get; set; } = 24;
-    public bool IsFocused { get; set; }
+
+    public bool IsFocused
+    {
+        get => _isFocused;
+        set
+        {
+            _isFocused = value;
+            if (value)
+            {
+                Active = this;
+            }
+            else if (ReferenceEquals(Active, this))
+            {
+                Active = null;
+                _composition = string.Empty;
+            }
+        }
+    }
     public bool IsPassword { get; set; }
     public int MaxLength { get; set; } = 24;
     public WzSprite? Background { get; set; }
+    /// <summary>When there is no <see cref="Background"/> sprite, draw a plain fallback box.
+    /// Set false to type directly over existing UI art (e.g. a wooden input recess).</summary>
+    public bool DrawFallbackBox { get; set; } = true;
     public BuiltInFont? Font { get; set; }
+    /// <summary>Colour of the typed text (default near-black for light panels).</summary>
+    public Color TextColor { get; set; } = Color.Black;
+    /// <summary>Caret colour (default black; e.g. cyan to stand out on a dark input recess).</summary>
+    public Color CaretColor { get; set; } = Color.Black;
 
     public string Text
     {
@@ -53,7 +84,16 @@ public sealed class TextField
         _text.Clear();
         _caret = 0;
         _selectionStart = -1;
+        _composition = string.Empty;
     }
+
+    /// <summary>Sets the live IME composition (preedit) string drawn at the caret. The
+    /// committed text still arrives via <see cref="OnTextInput"/>; this is the transient
+    /// "being typed" syllable shown underlined.</summary>
+    public void SetComposition(string composition) => _composition = composition ?? string.Empty;
+
+    /// <summary>Routes an IME composition update to whichever field is focused.</summary>
+    internal static void SetActiveComposition(string composition) => Active?.SetComposition(composition);
 
     public void OnTextInput(char ch)
     {
@@ -61,6 +101,9 @@ public sealed class TextField
         {
             return;
         }
+        // A committed character ends the current composition; clearing it here avoids a
+        // one-frame overlap of the preedit glyph and the inserted character.
+        _composition = string.Empty;
         if (ch == '\b')
         {
             if (HasSelection)
@@ -191,7 +234,7 @@ public sealed class TextField
                 Background.Draw(sb, Position);
             }
         }
-        else
+        else if (DrawFallbackBox)
         {
             sb.Draw(whitePixel, Bounds, new Color(230, 230, 230));
             sb.Draw(whitePixel, new Rectangle(Bounds.X, Bounds.Y, Bounds.Width, 1), Color.DarkGray);
@@ -203,9 +246,17 @@ public sealed class TextField
         int caretX;
         if (!IsPassword && Font is not null)
         {
-            var fullText = _text.ToString();
+            // Insert the live IME composition at the caret for display; the visual caret
+            // sits after it so the user is typing "into" the preedit. Committed text
+            // (_text) is unaffected — the composition is transient until WM_CHAR commits.
+            var committed = _text.ToString();
+            var composing = IsFocused && _composition.Length > 0;
+            var fullText = composing
+                ? string.Concat(committed.AsSpan(0, _caret), _composition, committed.AsSpan(_caret))
+                : committed;
+            var caretIdx = composing ? _caret + _composition.Length : _caret;
             var textY = (int)Position.Y + (Height - Font.LineHeight) / 2;
-            var caretPx = (int)Font.Measure(fullText[.._caret]).X;
+            var caretPx = (int)Font.Measure(fullText[..caretIdx]).X;
 
             // Keep the caret inside the field by scrolling the text horizontally.
             // Caret-on-right edge: snap _scrollPx so the caret hugs the right side.
@@ -226,8 +277,8 @@ public sealed class TextField
             var leftX = (int)Position.X + textPadX;
             var rightX = leftX + visibleWidth;
 
-            // Selection highlight, clipped to the visible window.
-            if (HasSelection && IsFocused)
+            // Selection highlight, clipped to the visible window. Hidden while composing.
+            if (HasSelection && IsFocused && !composing)
             {
                 var (lo, hi) = OrderedSelection();
                 var loPx = (int)Font.Measure(fullText[..lo]).X;
@@ -266,7 +317,20 @@ public sealed class TextField
             {
                 var visible = fullText[firstIdx..lastIdx];
                 var firstPx = (int)Font.Measure(fullText[..firstIdx]).X;
-                Font.Draw(sb, visible, new Vector2(leftX + (firstPx - _scrollPx), textY), Color.Black);
+                Font.Draw(sb, visible, new Vector2(leftX + (firstPx - _scrollPx), textY), TextColor);
+            }
+
+            // Underline the composition span so it reads as an IME preedit.
+            if (composing)
+            {
+                var underStart = (int)Font.Measure(fullText[.._caret]).X;
+                var underEnd = (int)Font.Measure(fullText[..caretIdx]).X;
+                var sx = Math.Max(leftX, leftX + (underStart - _scrollPx));
+                var ex = Math.Min(rightX, leftX + (underEnd - _scrollPx));
+                if (ex > sx)
+                {
+                    sb.Draw(whitePixel, new Rectangle(sx, textY + Font.LineHeight - 1, ex - sx, 1), TextColor);
+                }
             }
 
             caretX = leftX + (caretPx - _scrollPx);
@@ -315,7 +379,7 @@ public sealed class TextField
             var rightEdge = leftEdge + visibleWidth;
             if (caretX >= leftEdge && caretX <= rightEdge)
             {
-                sb.Draw(whitePixel, new Rectangle(caretX, (int)Position.Y + 4, 1, Height - 8), Color.Black);
+                sb.Draw(whitePixel, new Rectangle(caretX, (int)Position.Y + 4, 1, Height - 8), CaretColor);
             }
         }
     }

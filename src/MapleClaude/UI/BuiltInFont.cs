@@ -22,21 +22,25 @@ public sealed class BuiltInFont : IDisposable
     private readonly GraphicsDevice _gd;
     private readonly System.Drawing.Font _sysFont;
     private readonly System.Drawing.StringFormat _stringFormat;
+    private readonly System.Drawing.Text.TextRenderingHint _hint;
     private readonly Texture2D _asciiAtlas;
     private readonly Rectangle[] _asciiGlyphs = new Rectangle[128];
     private readonly Dictionary<int, GlyphEntry> _lazyGlyphs = new();
 
     public int LineHeight { get; }
 
-    public BuiltInFont(GraphicsDevice gd, string fontFamily = "Malgun Gothic", float emSize = 11f)
+    public BuiltInFont(GraphicsDevice gd, string fontFamily = "Malgun Gothic", float emSize = 11f,
+        System.Drawing.GraphicsUnit unit = System.Drawing.GraphicsUnit.Point,
+        System.Drawing.Text.TextRenderingHint hint = System.Drawing.Text.TextRenderingHint.AntiAlias)
     {
         _gd = gd;
-        _sysFont = new System.Drawing.Font(fontFamily, emSize, System.Drawing.FontStyle.Regular);
+        _hint = hint;
+        _sysFont = new System.Drawing.Font(fontFamily, emSize, System.Drawing.FontStyle.Regular, unit);
         _stringFormat = System.Drawing.StringFormat.GenericTypographic;
 
         using var measureBmp = new System.Drawing.Bitmap(1, 1);
         using var measureG = System.Drawing.Graphics.FromImage(measureBmp);
-        measureG.TextRenderingHint = System.Drawing.Text.TextRenderingHint.AntiAlias;
+        measureG.TextRenderingHint = _hint;
 
         var widths = new int[128];
         var maxH = 0f;
@@ -66,7 +70,7 @@ public sealed class BuiltInFont : IDisposable
         using (var g = System.Drawing.Graphics.FromImage(atlasBmp))
         {
             g.Clear(System.Drawing.Color.Transparent);
-            g.TextRenderingHint = System.Drawing.Text.TextRenderingHint.AntiAlias;
+            g.TextRenderingHint = _hint;
             g.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.HighQuality;
             using var brush = new System.Drawing.SolidBrush(System.Drawing.Color.White);
             var x = 0;
@@ -133,7 +137,7 @@ public sealed class BuiltInFont : IDisposable
 
         using var measureBmp = new System.Drawing.Bitmap(1, 1);
         using var measureG = System.Drawing.Graphics.FromImage(measureBmp);
-        measureG.TextRenderingHint = System.Drawing.Text.TextRenderingHint.AntiAlias;
+        measureG.TextRenderingHint = _hint;
         var sz = measureG.MeasureString(s, _sysFont, System.Drawing.PointF.Empty, _stringFormat);
         var w = Math.Max(1, (int)Math.Ceiling(sz.Width)) + 2;
         var h = LineHeight;
@@ -142,7 +146,7 @@ public sealed class BuiltInFont : IDisposable
         using (var g = System.Drawing.Graphics.FromImage(bmp))
         {
             g.Clear(System.Drawing.Color.Transparent);
-            g.TextRenderingHint = System.Drawing.Text.TextRenderingHint.AntiAlias;
+            g.TextRenderingHint = _hint;
             g.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.HighQuality;
             using var brush = new System.Drawing.SolidBrush(System.Drawing.Color.White);
             g.DrawString(s, _sysFont, brush, 0, 0, _stringFormat);
@@ -181,6 +185,27 @@ public sealed class BuiltInFont : IDisposable
                 sb.Draw(info.Texture, new Vector2(x, y), info.Source, color);
             }
             x += info.Width;
+        }
+    }
+
+    /// <summary>Draw at a uniform scale — for small labels (e.g. the char-creation row names)
+    /// where the full-size UI font overflows the space between the cyclers.</summary>
+    public void Draw(SpriteBatch sb, string s, Vector2 pos, Color color, float scale)
+    {
+        if (string.IsNullOrEmpty(s))
+        {
+            return;
+        }
+        var x = pos.X;
+        var y = pos.Y;
+        foreach (var rune in s.EnumerateRunes())
+        {
+            var info = GetGlyph(rune.Value);
+            if (info.Width > 0 && info.Texture is not null)
+            {
+                sb.Draw(info.Texture, new Vector2(x, y), info.Source, color, 0f, Vector2.Zero, scale, SpriteEffects.None, 0f);
+            }
+            x += info.Width * scale;
         }
     }
 

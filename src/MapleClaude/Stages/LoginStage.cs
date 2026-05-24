@@ -69,6 +69,14 @@ public sealed class LoginStage : Stage
     private Vector2 _cameraOffset = new(28, -8);
     private Vector2 _signboardCenter = new(371, 316);
 
+    // Scroll-back support: when "Back" on world-select returns here, the previous
+    // stage hands us its current camera so we scroll back up to the login position
+    // instead of snapping. _scrollT starts at 1 (settled) on a fresh launch
+    // (splash → login), and at 0 when a cameraStart is supplied (animate in).
+    private const float ScrollDuration = 0.55f;
+    private Vector2 _cameraStart;
+    private float _scrollT = 1f;
+
     // Per-widget offsets FROM the signboard top-left. ApplyLayout (called every
     // frame in Update) re-applies these so debug-window edits take effect live.
     private Vector2 _idOffset = new(15, 16);
@@ -89,13 +97,19 @@ public sealed class LoginStage : Stage
         ILoggerFactory loggerFactory,
         WzPackage? ui,
         WzPackage? map,
-        WzPackage? sound)
+        WzPackage? sound,
+        Vector2? cameraStart = null)
     {
         _logger = logger;
         _loggerFactory = loggerFactory;
         _ui = ui;
         _map = map;
         _sound = sound;
+        if (cameraStart is { } cs)
+        {
+            _cameraStart = cs;
+            _scrollT = 0f; // animate from the previous stage's camera back to login
+        }
     }
 
     public override void OnEnter(MapleClaudeGame game)
@@ -116,7 +130,16 @@ public sealed class LoginStage : Stage
             _scene = new MapScene(_loggerFactory.CreateLogger<MapScene>(), _map, _loader);
             _scene.Load(loginMap.Root);
 
-            ApplyCamera();
+            // Settled launch: place the camera at login. Scroll-back entry: start at
+            // the handed-in camera; Update() lerps it to the login position.
+            if (_scrollT < 1f)
+            {
+                _scene.Camera = _cameraStart;
+            }
+            else
+            {
+                ApplyCamera();
+            }
 
             if (_sound is not null && _scene.BgmPath is { Length: > 0 } bgmPath)
             {
@@ -168,13 +191,13 @@ public sealed class LoginStage : Stage
         // instead of silently doing nothing. Account creation is server-side
         // (Kinoko auto-registers an unknown ID/PW on first login).
         _btLoginIdLost = MakeButton("BtLoginIDLost", lostIdPos,
-            () => _notice?.Show("ID recovery isn't available on this server.", LoginNoticeOverlay.NoticeType.Ok));
+            () => _notice?.Show("ID recovery isn't available on this server.", LoginNoticeOverlay.NoticeType.Ok, 3f));
         _btPasswdLost = MakeButton("BtPasswdLost", lostPwPos,
-            () => _notice?.Show("Password recovery isn't available on this server.", LoginNoticeOverlay.NoticeType.Ok));
+            () => _notice?.Show("Password recovery isn't available on this server.", LoginNoticeOverlay.NoticeType.Ok, 3f));
         _btNew = MakeButton("BtNew", newPos,
-            () => _notice?.Show("New accounts are created automatically on first login.", LoginNoticeOverlay.NoticeType.Ok));
+            () => _notice?.Show("New accounts are created automatically on first login.", LoginNoticeOverlay.NoticeType.Ok, 3f));
         _btHomePage = MakeButton("BtHomePage", homePos,
-            () => _notice?.Show("No homepage is configured for this server.", LoginNoticeOverlay.NoticeType.Ok));
+            () => _notice?.Show("No homepage is configured for this server.", LoginNoticeOverlay.NoticeType.Ok, 3f));
         _btQuit = MakeButton("BtQuit", quitPos, () => _quitConfirm!.IsVisible = true);
 
         _saveCheck = new Checkbox
@@ -375,7 +398,7 @@ public sealed class LoginStage : Stage
     {
         // Re-apply tunables every frame so live edits via the debug window
         // take effect immediately.
-        ApplyCamera();
+        UpdateCamera(gameTime);
         ApplyLayout();
 
         // Inbound packets are drained once per tick by MapleClaudeGame.Update.
@@ -402,6 +425,36 @@ public sealed class LoginStage : Stage
             anyHover = true;
         }
         Game.Cursor?.SetHover(anyHover);
+    }
+
+    private void UpdateCamera(GameTime gameTime)
+    {
+        if (_scene is null)
+        {
+            return;
+        }
+        if (_scrollT < 1f)
+        {
+            // Scrolling back in from world-select: lerp the previous camera up to
+            // the login position with the same easing the forward scroll uses.
+            var dt = (float)gameTime.ElapsedGameTime.TotalSeconds;
+            _scrollT = Math.Min(1f, _scrollT + dt / ScrollDuration);
+            var sp = _scene.StartPoint ?? new Vector2(0, -8);
+            var target = sp + _cameraOffset;
+            _scene.Camera = Vector2.Lerp(_cameraStart, target, SmoothStep(_scrollT));
+        }
+        else
+        {
+            // Settled: re-apply every frame so live debug-window edits to the
+            // camera offset take effect immediately.
+            ApplyCamera();
+        }
+    }
+
+    private static float SmoothStep(float t)
+    {
+        t = Math.Clamp(t, 0f, 1f);
+        return t * t * (3f - 2f * t);
     }
 
     private void ApplyCamera()
@@ -588,6 +641,7 @@ public sealed class LoginStage : Stage
         // Login.img/Common/frame — the v95 client border/chrome that frames the
         // playable area. Drawn on top of the map but under the UI panels.
         _commonFrame?.Draw(spriteBatch, new Vector2(w / 2f, h / 2f));
+        DrawFrameMuteButton(spriteBatch);
 
         // Signboard panel — _signboardCenter is the tunable from RegisterDebugItems.
         _signboard?.Draw(spriteBatch, _signboardCenter);

@@ -10,16 +10,11 @@ namespace MapleClaude.Net.Handlers;
 /// </summary>
 public static class AvatarCodec
 {
-    /// <summary>List of v95 job IDs that use the extended-SP wire format.</summary>
-    private static readonly HashSet<int> ExtendSpJobIds = new()
-    {
-        // Evan
-        2001, 2200, 2210, 2211, 2212, 2213, 2214, 2215, 2216, 2217, 2218,
-        // Resistance Battle Mage / Wild Hunter / Mechanic
-        3300, 3310, 3311, 3312,
-        3500, 3510, 3511, 3512,
-        3200, 3210, 3211, 3212,
-    };
+    /// <summary>True for jobs that use the extended-SP wire form. Mirrors Kinoko
+    /// <c>JobConstants.isExtendSpJob = isResistanceJob(job/1000==3) || isEvanJob(job/100==22 || job==2001)</c>
+    /// — every Resistance job (incl. the Citizen base 3000) and every Evan job. The previous hardcoded
+    /// list omitted 3000, mis-sizing its SP field and desyncing the rest of SelectWorldResult.</summary>
+    private static bool IsExtendSpJob(int job) => job / 1000 == 3 || job / 100 == 22 || job == 2001;
 
     public static CharacterStat DecodeCharacterStat(InPacket p)
     {
@@ -46,7 +41,7 @@ public static class AvatarCodec
             MaxMp = p.ReadInt(),
             Ap = p.ReadShort(),
         };
-        if (ExtendSpJobIds.Contains(s.Job))
+        if (IsExtendSpJob(s.Job))
         {
             var count = p.ReadByte();
             // Each entry is {byte jobLevel, byte sp}.

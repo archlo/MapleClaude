@@ -129,16 +129,17 @@ public sealed class MapScene
                     continue;
                 }
                 var obj = ObjInfo.From(entry);
-                var sprite = LoadObjSprite(obj);
-                if (sprite is null)
+                // The login frame (Common/frame, one per step) is drawn as a centred
+                // UI overlay by the stages, so skip the map-object copy to avoid a
+                // doubled/offset border. Everything else stays — including
+                // WorldSelect/dual, the 800x576 ship-deck that IS the world-select
+                // background, and the per-step signboards.
+                if (obj.L0 == "Common" && obj.L1 == "frame")
                 {
                     continue;
                 }
-                // Skip full-screen chrome/promo objects: the per-step Common/frame
-                // (drawn as a centred UI overlay) and seasonal event splashes
-                // (e.g. WorldSelect/dual, an 800x576 banner) the client gates by
-                // condition. Scene props like the signboards (<=605 wide) stay.
-                if (sprite.Width >= 700 || sprite.Height >= 500)
+                var sprite = LoadObjSprite(obj);
+                if (sprite is null)
                 {
                     continue;
                 }

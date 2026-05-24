@@ -193,7 +193,7 @@ public sealed class GameStage : Stage
         // Full-avatar renderer (body + equips + hair + face), shared by the player
         // and other players. The real look/skin arrive via SetField / UserEnterField.
         _charRenderer = new CharacterRenderer(
-            _loggerFactory.CreateLogger<CharacterRenderer>(), _charWz, Game.ItemWz, _loader);
+            _loggerFactory.CreateLogger<CharacterRenderer>(), _charWz, Game.ItemWz, Game.BaseWz, _loader);
 
         // Player character — spawn at map origin
         _player = new CharLook(_loader, skinId: 0) { Position = Vector2.Zero };

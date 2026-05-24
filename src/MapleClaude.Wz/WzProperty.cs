@@ -12,6 +12,12 @@ public sealed class WzProperty
     private readonly long _offset;
     private Dictionary<string, object?>? _items;
     private long _endPosition;
+    private WzProperty? _parentProperty;
+
+    /// <summary>The property that contains this one (null for the image-root property).
+    /// Used to resolve <c>..</c> segments in <see cref="WzUol"/> targets.</summary>
+    internal WzProperty? ParentProperty => _parentProperty;
+    internal void SetParentProperty(WzProperty? parent) => _parentProperty = parent;
 
     internal WzProperty(WzImage parent, long offset)
     {
@@ -147,7 +153,14 @@ public sealed class WzProperty
                 {
                     var subSize = buf.ReadInt();
                     var subOffset = buf.Position;
-                    result[itemName] = ReadExtendedProperty(_parent, buf, crypto, subOffset);
+                    var child = ReadExtendedProperty(_parent, buf, crypto, subOffset);
+                    // Record the parent so UOL targets can walk ".." up the tree.
+                    switch (child)
+                    {
+                        case WzProperty p: p.SetParentProperty(this); break;
+                        case WzUol u: u.ParentProperty = this; break;
+                    }
+                    result[itemName] = child;
                     buf.Position = subOffset + subSize;
                     break;
                 }

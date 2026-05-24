@@ -49,9 +49,11 @@ public sealed class GameCamera
         var maxX = MapBounds.Right - hw;
         var minY = MapBounds.Top + hh;
         var maxY = MapBounds.Bottom - hh;
+        // When the map is smaller than the viewport on an axis, min > max — Math.Clamp would throw.
+        // Centre the camera on the map midpoint there so the whole (small) map is shown, centred.
         Position = new Vector2(
-            Math.Clamp(Position.X, minX, maxX),
-            Math.Clamp(Position.Y, minY, maxY));
+            minX <= maxX ? Math.Clamp(Position.X, minX, maxX) : (MapBounds.Left + MapBounds.Right) / 2f,
+            minY <= maxY ? Math.Clamp(Position.Y, minY, maxY) : (MapBounds.Top + MapBounds.Bottom) / 2f);
     }
 
     /// <summary>

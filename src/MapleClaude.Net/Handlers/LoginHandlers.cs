@@ -24,6 +24,11 @@ public sealed class LoginHandlers
     public event Action<DeleteCharacterArgs>? OnDeleteCharacterResult;
     public event Action<SelectCharacterResultArgs>? OnSelectCharacterResult;
 
+    /// <summary>Fired when the login server rejects the secondary password (PIC) sent in a
+    /// CheckSPWRequest — i.e. the entered PIC was wrong. A correct PIC instead produces a normal
+    /// <see cref="OnSelectCharacterResult"/> (the server migrates on success).</summary>
+    public event Action? OnCheckSpwFailed;
+
     public LoginHandlers(ILogger<LoginHandlers> logger, ClientSession session)
     {
         _logger = logger;
@@ -43,6 +48,7 @@ public sealed class LoginHandlers
         router.Register(OutHeader.DeleteCharacterResult, (p, s) => HandleDeleteCharacterResult(p));
         router.Register(OutHeader.SelectCharacterResult, (p, s) => HandleSelectCharacterResult(p, byVac: false));
         router.Register(OutHeader.SelectCharacterByVACResult, (p, s) => HandleSelectCharacterResult(p, byVac: true));
+        router.Register(OutHeader.CheckSPWResult, (p, s) => HandleCheckSpwResult(p));
         router.Register(OutHeader.AliveReq, (p, s) => HandleAliveReq(s));
     }
 
@@ -219,6 +225,15 @@ public sealed class LoginHandlers
             ResultCode = code,
             CharacterId = charId,
         });
+    }
+
+    private void HandleCheckSpwResult(InPacket p)
+    {
+        // checkSecondaryPasswordResult: one ignored byte. The server sends this ONLY on failure
+        // (wrong PIC); a correct PIC migrates the client via SelectCharacterResult instead.
+        p.ReadByte(); // ignored (-1)
+        _logger.LogInformation("CheckSPWResult — secondary password (PIC) rejected");
+        OnCheckSpwFailed?.Invoke();
     }
 
     private void HandleSelectCharacterResult(InPacket p, bool byVac)

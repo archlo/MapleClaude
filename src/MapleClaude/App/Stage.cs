@@ -1,3 +1,4 @@
+using MapleClaude.UI;
 using Microsoft.Xna.Framework;
 using Microsoft.Xna.Framework.Graphics;
 
@@ -28,6 +29,25 @@ public abstract class Stage
     }
 
     public abstract void Draw(GameTime gameTime, SpriteBatch spriteBatch);
+
+    private MuteButton? _frameMuteButton;
+
+    /// <summary>
+    /// Draws — and services input for — the BGM mute toggle at the login
+    /// <c>Common/frame</c>'s top-right corner. Call once per frame from a framed login
+    /// stage's <see cref="Draw"/>, right after the frame sprite is drawn. The toggle is
+    /// backed by the persistent audio player, so its state carries across stages.
+    /// </summary>
+    protected void DrawFrameMuteButton(SpriteBatch spriteBatch)
+    {
+        _frameMuteButton ??= new MuteButton(
+            () => Game.AudioPlayer.Muted,
+            () => Game.AudioPlayer.ToggleMute(),
+            Game.Font);
+        var pp = GraphicsDevice.PresentationParameters;
+        _frameMuteButton.ServiceAndDraw(spriteBatch, Game.WhitePixel,
+            pp.BackBufferWidth, pp.BackBufferHeight);
+    }
 
     /// <summary>Called when the user types a character (Unicode TextInput event).</summary>
     public virtual void OnTextInput(char character)

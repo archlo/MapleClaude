@@ -34,9 +34,10 @@ public sealed class Camera2D
             var maxX = field.Info.VRRight - halfW;
             var minY = field.Info.VRTop + halfH;
             var maxY = field.Info.VRBottom - halfH;
+            // If the VR is smaller than the viewport on an axis, min > max — clamp would throw; centre instead.
             Position = new Vector2(
-                Math.Clamp(Position.X, minX, maxX),
-                Math.Clamp(Position.Y, minY, maxY));
+                minX <= maxX ? Math.Clamp(Position.X, minX, maxX) : (field.Info.VRLeft + field.Info.VRRight) / 2f,
+                minY <= maxY ? Math.Clamp(Position.Y, minY, maxY) : (field.Info.VRTop + field.Info.VRBottom) / 2f);
         }
     }
 }

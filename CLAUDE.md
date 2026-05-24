@@ -21,6 +21,24 @@ Or open `MapleClaude.slnx` in Visual Studio 2026.
 
 Runtime requires a running Kinoko login server (defaults to `127.0.0.1:8484`) and a directory of standard v95 WZ files. See `README.md` for the environment variables.
 
+### Hot-reload dev loop (no close/build/deploy/reopen)
+
+```powershell
+.\watch.ps1
+```
+
+Runs the client under `dotnet watch run` (from `bin/`, not the deployed single-file exe). On save,
+**method-body edits** (Draw/Update/layout logic) apply live via .NET Hot Reload; **structural edits**
+(new/changed fields, field initializers, signatures, types) are "rude edits" → `dotnet watch`
+auto-rebuilds and relaunches. Either way there's no manual cycle. The script finds the WZ folder
+from `MAPLECLAUDE_WZ_DIR`, then `MAPLECLAUDE_DEPLOY_DIR`, then `.deploy.local` (the deploy folder
+*is* the WZ folder) and passes `-p:NoAutoPublish=true -p:NoAutoDeploy=true` so each rebuild skips
+the single-file publish.
+
+`watch.ps1` also sets `MAPLECLAUDE_DEBUG=1`, which opens the **live layout overlay**: tick "drag"
+and drag a registered position knob (e.g. the `CharCreate` panels/fields) to tune layout with
+**zero rebuild**, then bake the value into the default. Any non-empty `MAPLECLAUDE_DEBUG` enables it.
+
 ### Single-file `.exe` is the default build output
 
 **Every `dotnet build` (and every F5 in Visual Studio) auto-produces a single self-contained `MapleClaude.exe`** at:

@@ -75,4 +75,9 @@ public static class LoginSender
 
     /// <summary>AliveAck (<see cref="InHeader.AliveAck"/>, opcode 25). Empty body.</summary>
     public static OutPacket AliveAck() => OutPacket.Of(InHeader.AliveAck);
+
+    /// <summary>LogoutWorld (<see cref="InHeader.LogoutWorld"/>, opcode 12). Empty body, no reply.
+    /// Sent when leaving a world's character list back to world select; the server logs it and the
+    /// client then re-issues WorldInfoRequest to refresh the world list.</summary>
+    public static OutPacket LogoutWorld() => OutPacket.Of(InHeader.LogoutWorld);
 }
