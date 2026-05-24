@@ -26,8 +26,8 @@ public sealed class MapScene
     private readonly WzPackage _mapPkg;
     private readonly WzTextureLoader _loader;
 
-    private readonly List<(BackInfo Info, WzSprite? Sprite)> _backgrounds = new();
-    private readonly List<(BackInfo Info, WzSprite? Sprite)> _foregrounds = new();
+    private readonly List<(int Index, BackInfo Info, WzSprite? Sprite)> _backgrounds = new();
+    private readonly List<(int Index, BackInfo Info, WzSprite? Sprite)> _foregrounds = new();
     private readonly List<(int Layer, ObjInfo Info, WzSprite? Sprite)> _objects = new();
 
     /// <summary>BGM path from the map's <c>info/bgm</c> property (e.g. <c>"BgmUI/Title"</c>).</summary>
@@ -91,15 +91,22 @@ public sealed class MapScene
                 }
                 var bg = BackInfo.From(entry);
                 var sprite = LoadBackSprite(bg);
+                var idx = int.TryParse(key, out var k) ? k : 0;
                 if (bg.Front)
                 {
-                    _foregrounds.Add((bg, sprite));
+                    _foregrounds.Add((idx, bg, sprite));
                 }
                 else
                 {
-                    _backgrounds.Add((bg, sprite));
+                    _backgrounds.Add((idx, bg, sprite));
                 }
             }
+            // Draw in numeric back-index order (back/0 furthest behind ... back/N
+            // in front). WzProperty.Items preserves WZ read order, which is NOT
+            // numeric here, so the per-step sky (e.g. back/1) would otherwise paint
+            // over its scene backdrop (e.g. back/29) — leaving char-select blank sky.
+            _backgrounds.Sort((a, b) => a.Index.CompareTo(b.Index));
+            _foregrounds.Sort((a, b) => a.Index.CompareTo(b.Index));
             _logger.LogInformation(
                 "Map scene loaded {BgCount} backdrops, {FgCount} foregrounds (bgm={Bgm})",
                 _backgrounds.Count, _foregrounds.Count, BgmPath);
@@ -148,7 +155,7 @@ public sealed class MapScene
         var screenCenter = new Vector2(screenWidth / 2f, screenHeight / 2f);
 
         // Backdrops (behind world)
-        foreach (var (info, sprite) in _backgrounds)
+        foreach (var (_, info, sprite) in _backgrounds)
         {
             DrawBackEntry(sb, info, sprite, screenCenter, screenWidth, screenHeight);
         }
@@ -164,7 +171,7 @@ public sealed class MapScene
         }
 
         // Foregrounds (in front of world)
-        foreach (var (info, sprite) in _foregrounds)
+        foreach (var (_, info, sprite) in _foregrounds)
         {
             DrawBackEntry(sb, info, sprite, screenCenter, screenWidth, screenHeight);
         }
