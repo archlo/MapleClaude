@@ -62,7 +62,11 @@ public sealed class LoginStage : Stage
     // Mutable layout state exposed to the debug window for live tuning.
     // Values were nailed down by hand using drag-mode in the debug window
     // and then squared up (matching rows share Y; top/bottom rows space evenly).
-    private Vector2 _cameraOffset = new(27, -8);
+    // Authentic login camera centre: CLogin sets the screen centre to
+    // (28, GetStepHeight(step)) where GetStepHeight = -8 - 600*step. Step 0 (login)
+    // = (28, -8); world-select (step 1) and char-select (step 2) inherit X and use
+    // -608 / -1208. Verified against CLogin::ChangeStepImmediate (IDA).
+    private Vector2 _cameraOffset = new(28, -8);
     private Vector2 _signboardCenter = new(371, 316);
 
     // Per-widget offsets FROM the signboard top-left. ApplyLayout (called every

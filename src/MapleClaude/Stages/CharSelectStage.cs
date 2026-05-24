@@ -1,4 +1,5 @@
 using MapleClaude.App;
+using MapleClaude.Character;
 using MapleClaude.Debug;
 using MapleClaude.Domain;
 using MapleClaude.Map;
@@ -56,6 +57,7 @@ public sealed class CharSelectStage : Stage
 
     private WzTextureLoader? _loader;
     private MapScene? _scene;
+    private CharacterRenderer? _charRenderer;
 
     // Shared chrome (overlay)
     private WzSprite? _commonFrame;
@@ -156,6 +158,9 @@ public sealed class CharSelectStage : Stage
             _scene.Load(loginMap.Root);
             _scene.Camera = _cameraStart;
         }
+
+        _charRenderer = new CharacterRenderer(
+            _loggerFactory.CreateLogger<CharacterRenderer>(), Game.CharWz, Game.ItemWz, _loader);
 
         _commonFrame = LoadCanvas("Login.img/Common/frame");
         _stepIndicator = LoadCanvas("Login.img/Common/step/2");
@@ -325,12 +330,15 @@ public sealed class CharSelectStage : Stage
                 continue;
             }
 
-            // Avatar rendering is deferred; show the name + level beneath the slot.
+            // Render the real avatar standing on the slot (feet at the slot anchor),
+            // then the name + level beneath it.
+            var entry = Characters[absIdx];
+            _charRenderer?.Draw(sb, entry.Look, entry.Stat, Stance.Stand1, frame: 0,
+                footPos: pos, facingLeft: false);
             if (Game.Font != null)
             {
-                var stat = Characters[absIdx].Stat;
-                DrawCentered(sb, stat.Name, pos + new Vector2(0, 6), Color.White);
-                DrawCentered(sb, $"Lv.{stat.Level}", pos + new Vector2(0, 20), new Color(220, 200, 100));
+                DrawCentered(sb, entry.Stat.Name, pos + new Vector2(0, 6), Color.White);
+                DrawCentered(sb, $"Lv.{entry.Stat.Level}", pos + new Vector2(0, 20), new Color(220, 200, 100));
             }
         }
     }
