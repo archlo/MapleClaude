@@ -84,6 +84,7 @@ public sealed class GameStage : Stage
     // New high-priority panels
     private WorldMap?       _worldMap;
     private UserList?       _userList;
+    private FamilyWindow?   _familyWindow;
     private ChannelSelect?  _channelSelect;
     private StatusMessenger? _messenger;
 
@@ -139,6 +140,8 @@ public sealed class GameStage : Stage
     // Social state. Party member ids are cached from the last PartyResult so /p
     // (party chat) can address them; a pending invite lets /accept join.
     private readonly List<int> _partyMemberIds = new();
+    private readonly List<int> _buddyIds = new();        // online friends' char ids (for /b)
+    private readonly List<int> _guildMemberIds = new();  // online guild members' char ids (for /g)
     private int _pendingInviterId;
     private bool _hasPendingInvite;
     private string _myName = "Hero";
@@ -378,6 +381,19 @@ public sealed class GameStage : Stage
         _channelSelect = new ChannelSelect(_loader, _ui, font);
         _messenger     = new StatusMessenger(font) { Position = new Vector2(10, 340) };
         _dmgNumbers    = new DamageNumber(font);
+        _familyWindow  = new FamilyWindow (_loader, _ui, font);
+
+        // ── Community window actions → protocol senders ───────────────────────────
+        _userList.OnAddFriend    = name => { if (name.Length > 0) { SendIfConnected(GameSender.FriendAdd(name)); _chatBar?.AddLine($"Buddy request sent to {name}.", new Color(150, 220, 150)); } };
+        _userList.OnDeleteFriend = id   => SendIfConnected(GameSender.FriendDelete(id));
+        _userList.OnPartyInvite  = name => { if (name.Length > 0) SendIfConnected(GameSender.PartyInvite(name)); };
+        _userList.OnPartyKick    = id   => SendIfConnected(GameSender.PartyKick(id));
+        _userList.OnPartyCreate  = ()   => SendIfConnected(GameSender.PartyCreate());
+        _userList.OnPartyLeave   = ()   => SendIfConnected(GameSender.PartyLeave());
+        _userList.OnGuildLeave   = ()   => { if (Game.CharacterId != 0) SendIfConnected(GameSender.GuildLeave(Game.CharacterId, _myName)); };
+        _userList.OnGroupChatHint = type => _chatBar?.AddLine(
+            $"To chat, type {type switch { 0 => "/b", 1 => "/p", 2 => "/g", 3 => "/a", _ => "/b" }} <message>",
+            new Color(150, 200, 150));
 
         // Bottom-bar buttons. The Menu / System buttons open authentic pop-up submenus (handled inside
         // StatusBar); their items route to the panels below.
@@ -416,6 +432,7 @@ public sealed class GameStage : Stage
 
         _panels.Add(_worldMap);
         _panels.Add(_userList);
+        _panels.Add(_familyWindow);
         _panels.Add(_channelSelect);
         _panels.Add(_messenger);
 
@@ -792,10 +809,13 @@ public sealed class GameStage : Stage
         fh.OnFriendList += list =>
         {
             _userList!.ClearFriends();
+            _buddyIds.Clear();
+            _buddyIds.AddRange(list.Where(f => f.Online).Select(f => f.FriendId));
             foreach (var f in list)
             {
                 _userList.AddFriend(new UserList.FriendEntry
                 {
+                    FriendId = f.FriendId,
                     Name     = f.Name,
                     Level    = 0,
                     Job      = string.Empty,
@@ -812,10 +832,11 @@ public sealed class GameStage : Stage
             _partyMemberIds.AddRange(members.Select(m => m.CharId));
             _userList!.SetParty(members.Select(m => new UserList.PartyEntry
             {
-                Name  = m.Name,
-                Level = m.Level,
-                Job   = JobName(m.Job),
-                HpPct = 100,
+                CharId = m.CharId,
+                Name   = m.Name,
+                Level  = m.Level,
+                Job    = JobName(m.Job),
+                HpPct  = 100,
             }));
             _logger.LogInformation("Party loaded: {Count} member(s) boss={Boss}", members.Count, bossId);
         };
@@ -823,7 +844,9 @@ public sealed class GameStage : Stage
         fh.OnGuildLoad += args =>
         {
             if (_userList is null) return;
-            if (args is null) { _userList.SetGuild(string.Empty, Array.Empty<UserList.GuildEntry>()); return; }
+            if (args is null) { _userList.SetGuild(string.Empty, Array.Empty<UserList.GuildEntry>()); _guildMemberIds.Clear(); return; }
+            _guildMemberIds.Clear();
+            _guildMemberIds.AddRange(args.Members.Where(m => m.Online).Select(m => m.CharacterId));
             _userList.SetGuild(args.Name, args.Members.Select(m => new UserList.GuildEntry
             {
                 Name   = m.Name,
@@ -1774,6 +1797,36 @@ public sealed class GameStage : Stage
             return;
         }
 
+        if (TryConsumeCommand(line, "/b ", out var buddyRest) && buddyRest.Length > 0)
+        {
+            if (_buddyIds.Count == 0) { _chatBar?.AddLine("No buddies are online.", new Color(220, 120, 120)); return; }
+            SendIfConnected(GameSender.GroupChat(GameSender.ChatGroupType.Friend, _buddyIds, buddyRest));
+            _chatBar?.AddLine($"[Buddy] {_myName} : {buddyRest}", GroupColor((int)GameSender.ChatGroupType.Friend));
+            return;
+        }
+
+        if (TryConsumeCommand(line, "/g ", out var guildRest) && guildRest.Length > 0)
+        {
+            if (_guildMemberIds.Count == 0) { _chatBar?.AddLine("You are not in a guild.", new Color(220, 120, 120)); return; }
+            SendIfConnected(GameSender.GroupChat(GameSender.ChatGroupType.Guild, _guildMemberIds, guildRest));
+            _chatBar?.AddLine($"[Guild] {_myName} : {guildRest}", GroupColor((int)GameSender.ChatGroupType.Guild));
+            return;
+        }
+
+        if (TryConsumeCommand(line, "/a ", out var allyRest) && allyRest.Length > 0)
+        {
+            // Alliance relays via the guild roster we know (full alliance-member decode is a follow-up).
+            SendIfConnected(GameSender.GroupChat(GameSender.ChatGroupType.Alliance, _guildMemberIds, allyRest));
+            _chatBar?.AddLine($"[Alliance] {_myName} : {allyRest}", GroupColor((int)GameSender.ChatGroupType.Alliance));
+            return;
+        }
+
+        if (line.StartsWith("/family", StringComparison.OrdinalIgnoreCase))
+        {
+            if (_familyWindow != null) _familyWindow.IsVisible = !_familyWindow.IsVisible;
+            return;
+        }
+
         if (TryConsumeCommand(line, "/invite ", out var inviteName))
         {
             var (name, _) = SplitFirstToken(inviteName);
@@ -1901,6 +1954,7 @@ public sealed class GameStage : Stage
     public override void OnTextInput(char ch)
     {
         if (_npcTalk?.IsVisible == true) { _npcTalk.OnTextInput(ch); return; }
+        if (_userList is { IsVisible: true, WantsTextInput: true }) { _userList.OnTextInput(ch); return; }
         _chatBar?.OnTextInput(ch);
     }
 

@@ -9,37 +9,42 @@ using Microsoft.Xna.Framework.Input;
 namespace MapleClaude.UI.Game;
 
 /// <summary>
-/// Friends / Party / Guild list panel.
-/// 8 tabs: Friend | Friend(All) | Friend(Online) | Party(Mine) | Party(Search) | Boss | Blacklist | Guild
-/// Toggle with key binding or social button in StatusBar.
-/// WZ: UIWindow2.img/UserList/
+/// Community window — the authentic v95 <c>CUIUserList</c> "Main" panel, drawn from
+/// <c>UIWindow2.img/UserList/Main</c> (layered frame 264×382, baked "MAPLE USER LIST &amp; GUILD").
+/// Six baked tabs: <b>Friend</b>, <b>Party</b>, <b>Guild</b>, <b>Alliance</b> (Union), Expedition,
+/// <b>Blacklist</b> — tab sprites <c>Main/Tab/enabled|disabled/0..5</c> at x={9,40,71,112,143,194} y=25.
+///
+/// Friend / Party / Guild are wired to the real protocol (add/delete buddy, party create/invite/kick/
+/// leave, guild withdraw) via callbacks the stage maps to senders; Alliance chat is via <c>/a</c>;
+/// the Blacklist is client-local (the Kinoko build has no block opcode). A shared name <see cref="TextField"/>
+/// at the bottom feeds the add/invite/block actions.
 /// </summary>
 public sealed class UserList : GamePanel
 {
-    // ── Tab enum ──────────────────────────────────────────────────────────────
-    public enum Tab { Friend, FriendAll, FriendOnline, PartyMine, PartySearch, Boss, Blacklist, Guild }
+    public enum Tab { Friend = 0, Party = 1, Guild = 2, Alliance = 3, Expedition = 4, Blacklist = 5 }
 
-    private static readonly string[] TabLabels =
-        ["Friends", "All", "Online", "My Party", "Find", "Boss", "Block", "Guild"];
+    private static readonly int[] TabX = { 9, 40, 71, 112, 143, 194 };
+    private static readonly int[] TabW = { 30, 30, 40, 30, 50, 59 };
+    private const int TabY = 25, TabH = 19;
 
-    // ── Entry types ───────────────────────────────────────────────────────────
+    // ── Entry types ─────────────────────────────────────────────────────────────
     public sealed class FriendEntry
     {
+        public int    FriendId;
         public string Name     = string.Empty;
         public string Location = "Online";
         public int    Level    = 1;
         public string Job      = "Beginner";
         public bool   Online   = true;
     }
-
     public sealed class PartyEntry
     {
+        public int    CharId;
         public string Name  = string.Empty;
         public int    Level = 1;
         public string Job   = string.Empty;
         public int    HpPct = 100;
     }
-
     public sealed class GuildEntry
     {
         public string Name = string.Empty;
@@ -47,307 +52,350 @@ public sealed class UserList : GamePanel
         public bool   Online;
     }
 
-    // ── Data ──────────────────────────────────────────────────────────────────
-    private readonly List<FriendEntry> _friends    = new();
-    private readonly List<PartyEntry>  _party      = new();
+    // ── Data ────────────────────────────────────────────────────────────────────
+    private readonly List<FriendEntry> _friends   = new();
+    private readonly List<PartyEntry>  _party     = new();
     private readonly List<GuildEntry>  _guild      = new();
+    private readonly List<GuildEntry>  _alliance   = new();
     private readonly List<string>      _blacklist  = new();
+    private string _guildName    = string.Empty;
+    private string _allianceName = string.Empty;
 
-    // ── UI ────────────────────────────────────────────────────────────────────
-    private readonly WzSprite? _background;
-    private readonly Button?   _btClose;
-    private readonly Button?   _btAddFriend;
-    private readonly Button?   _btCreateParty;
-    private readonly Button?   _btLeaveParty;
-    private readonly Button?[] _tabBtns = new Button?[8];
-    private readonly List<Button> _allButtons = new();
+    private int _selFriend = -1;   // index into _friends
+    private int _selParty  = -1;
+    private int _selBlack  = -1;
 
-    private Tab  _activeTab   = Tab.Friend;
-    private string _guildName = string.Empty;
+    // ── WZ assets ───────────────────────────────────────────────────────────────
+    private readonly WzSprite? _bg, _bg2;
+    private readonly WzSprite?[] _tabOn  = new WzSprite?[6];
+    private readonly WzSprite?[] _tabOff = new WzSprite?[6];
+    private readonly Button? _btClose;
+    private readonly TextField _nameField = new() { Width = 150, Height = 18, MaxLength = 13 };
+    private readonly BuiltInFont? _font;
+
+    private Tab  _activeTab = Tab.Friend;
     private int  _scroll;
     private bool _dragging;
     private Vector2 _dragOff;
 
-    private const int PanelW   = 200;
-    private const int PanelH   = 400;
-    private const int TabH     = 20;
-    private const int EntryH   = 28;
-    private const int ListY    = 30 + TabH;
-    private const int ListRows = 11;
+    // ── Callbacks (wired by GameStage → senders) ──────────────────────────────────
+    public Action<string>? OnAddFriend;       // name
+    public Action<int>?    OnDeleteFriend;    // friendId
+    public Action<string>? OnPartyInvite;     // name (also used by Friend → invite-to-party)
+    public Action<int>?    OnPartyKick;       // charId
+    public Action?         OnPartyCreate;
+    public Action?         OnPartyLeave;
+    public Action?         OnGuildLeave;
+    public Action<int>?    OnGroupChatHint;   // group type 0=buddy 1=party 2=guild 3=alliance
 
-    private readonly BuiltInFont? _font;
+    private const int ListX = 12, ListW = 240, EntryH = 30;
+    private int ListTop => 58;
+    private int ListBottom => PanelH - 56;
+    private int VisibleRows => Math.Max(1, (ListBottom - ListTop) / EntryH);
+
+    private int PanelW => _bg?.Width ?? 264;
+    private int PanelH => _bg?.Height ?? 382;
 
     public UserList(WzTextureLoader loader, WzPackage? ui, BuiltInFont? font)
     {
         _font = font;
         IsVisible = false;
-        Position = new Vector2(600, 80);
+        Position = new Vector2(560, 70);
+        _nameField.Font = font;
+        _nameField.TextColor = new Color(40, 36, 30);
+        _nameField.CaretColor = new Color(40, 36, 30);
 
-        var ul = ui?.GetItem("UIWindow2.img/UserList") as WzProperty;
-        _background   = ul?.Get("backgrnd")      is WzCanvas bc ? loader.Load(bc) : null;
+        var main = ui?.GetItem("UIWindow2.img/UserList/Main") as WzProperty;
+        _bg  = Canvas(loader, main, "backgrnd");
+        _bg2 = Canvas(loader, main, "backgrnd2");
+        var on  = (main?.Get("Tab") as WzProperty)?.Get("enabled")  as WzProperty;
+        var off = (main?.Get("Tab") as WzProperty)?.Get("disabled") as WzProperty;
+        for (var i = 0; i < 6; i++) { _tabOn[i] = Canvas(loader, on, i.ToString()); _tabOff[i] = Canvas(loader, off, i.ToString()); }
 
-        _btClose       = MakeBtn(loader, ul, "BtClose",       () => IsVisible = false);
-        _btAddFriend   = MakeBtn(loader, ul, "BtAddFriend",   () => { });
-        _btCreateParty = MakeBtn(loader, ul, "BtPartyCreate", () => { });
-        _btLeaveParty  = MakeBtn(loader, ul, "BtPartyLeave",  () => { });
-
-        var tabNode = ul?.Get("tab") as WzProperty;
-        for (var i = 0; i < 8; i++)
-        {
-            var idx = i;
-            var pr = (tabNode?.Get($"{i}") as WzProperty);
-            if (pr != null)
-            {
-                _tabBtns[i] = new Button(loader, pr) { OnClick = () => SetTab((Tab)idx) };
-                _allButtons.Add(_tabBtns[i]!);
-            }
-        }
-
-        SeedPlaceholder();
-        LayoutButtons();
+        if (ui?.GetItem("Basic.img/BtClose3") is WzProperty close)
+            _btClose = new Button(loader, close) { OnClick = () => IsVisible = false };
     }
 
-    // ── Data API ──────────────────────────────────────────────────────────────
-
+    // ── Data API (called by GameStage) ────────────────────────────────────────────
     public void AddFriend(FriendEntry e) => _friends.Add(e);
-    public void ClearFriends() { _friends.Clear(); _scroll = 0; }
-    public void SetParty(IEnumerable<PartyEntry> p) { _party.Clear(); _party.AddRange(p); }
-    public void SetGuild(string name, IEnumerable<GuildEntry> g)
-    {
-        _guildName = name;
-        _guild.Clear();
-        _guild.AddRange(g);
-    }
+    public void ClearFriends() { _friends.Clear(); _scroll = 0; _selFriend = -1; }
+    public void SetParty(IEnumerable<PartyEntry> p) { _party.Clear(); _party.AddRange(p); _selParty = -1; }
+    public void SetGuild(string name, IEnumerable<GuildEntry> g) { _guildName = name; _guild.Clear(); _guild.AddRange(g); }
+    public void SetAlliance(string name, IEnumerable<GuildEntry> a) { _allianceName = name; _alliance.Clear(); _alliance.AddRange(a); }
 
-    private void SetTab(Tab t) { _activeTab = t; _scroll = 0; }
+    /// <summary>Whether the inline name field currently owns keyboard focus (so the stage routes
+    /// text input here instead of to chat/hotkeys).</summary>
+    public bool WantsTextInput => _nameField.IsFocused;
+    public override void OnTextInput(char ch) => _nameField.OnTextInput(ch);
 
-    // ── Update ────────────────────────────────────────────────────────────────
-
+    // ── Update ────────────────────────────────────────────────────────────────────
     public override void Update(GameTime gt)
     {
-        LayoutButtons();
-        var mouse = Mouse.GetState();
-        var mp = new Vector2(mouse.X, mouse.Y);
+        if (!IsVisible) return;
+        if (_btClose != null) _btClose.Position = Position + new Vector2(PanelW - 18, 4);
+        _nameField.Position = Position + new Vector2(ListX, PanelH - 26);
+        _nameField.Update(gt);
+        var m = Mouse.GetState();
         if (_dragging)
         {
-            if (mouse.LeftButton == ButtonState.Pressed) Position = mp - _dragOff;
+            if (m.LeftButton == ButtonState.Pressed) Position = new Vector2(m.X, m.Y) - _dragOff;
             else _dragging = false;
         }
+        _btClose?.Update(m.X, m.Y, m.LeftButton == ButtonState.Pressed);
     }
 
-    // ── Draw ──────────────────────────────────────────────────────────────────
-
+    // ── Draw ──────────────────────────────────────────────────────────────────────
     public override void Draw(SpriteBatch sb, Texture2D white)
     {
         if (!IsVisible) return;
-
         var px = (int)Position.X;
         var py = (int)Position.Y;
 
-        // Background
-        if (_background != null)
-            _background.Draw(sb, Position + new Vector2(PanelW / 2f, PanelH / 2f));
+        if (_bg != null) { _bg.Draw(sb, Position); _bg2?.Draw(sb, Position); }
         else
         {
             sb.Draw(white, new Rectangle(px, py, PanelW, PanelH), new Color(12, 14, 24, 240));
             DrawBorder(sb, white, new Rectangle(px, py, PanelW, PanelH), new Color(60, 65, 100));
+            _font?.Draw(sb, "MAPLE USER LIST", new Vector2(px + 70, py + 5), new Color(220, 200, 150));
         }
 
-        // Title
-        sb.Draw(white, new Rectangle(px, py, PanelW, 28), new Color(16, 18, 36));
-        _font?.Draw(sb, TabLabels[(int)_activeTab], new Vector2(px + 70, py + 8), new Color(220, 200, 150));
-
-        // Tab strip
-        var tabW = PanelW / 8;
-        for (var i = 0; i < 8; i++)
+        for (var i = 0; i < 6; i++)
         {
-            var tx = px + i * tabW;
-            var tabR = new Rectangle(tx, py + 28, tabW, TabH);
-            var isActive = i == (int)_activeTab;
-            sb.Draw(white, tabR, isActive ? new Color(40, 50, 80) : new Color(20, 22, 38));
-            DrawBorder(sb, white, tabR, isActive ? new Color(100, 120, 200) : new Color(40, 45, 70));
-            _font?.Draw(sb, TabLabels[i][0].ToString(), new Vector2(tx + tabW / 2 - 3, py + 31),
-                isActive ? Color.White : new Color(130, 135, 160));
+            var spr = i == (int)_activeTab ? _tabOn[i] : _tabOff[i];
+            if (spr != null) spr.Draw(sb, Position);
         }
 
-        // Entry list
-        DrawList(sb, white, px, py + ListY);
-
-        // Action buttons
-        if (_activeTab == Tab.Friend || _activeTab == Tab.FriendAll || _activeTab == Tab.FriendOnline)
-            _btAddFriend?.Draw(sb);
-        else if (_activeTab == Tab.PartyMine)
+        switch (_activeTab)
         {
-            _btCreateParty?.Draw(sb);
-            _btLeaveParty?.Draw(sb);
+            case Tab.Friend:    DrawFriends(sb, white, px, py); break;
+            case Tab.Party:     DrawParty(sb, white, px, py); break;
+            case Tab.Guild:     DrawGuildList(sb, white, px, py, _guildName, _guild, "Not in a guild."); break;
+            case Tab.Alliance:  DrawGuildList(sb, white, px, py, _allianceName, _alliance, "Not in an alliance.  Chat: /a"); break;
+            case Tab.Expedition: _font?.Draw(sb, "Expedition is not available", new Vector2(px + 40, py + 150), new Color(140, 140, 150)); break;
+            case Tab.Blacklist: DrawBlacklist(sb, white, px, py); break;
         }
 
-        foreach (var b in _tabBtns) b?.Draw(sb);
+        DrawActionBar(sb, white);
+        if (NeedsNameField()) _nameField.Draw(sb, white);
         _btClose?.Draw(sb);
     }
 
-    private void DrawList(SpriteBatch sb, Texture2D white, int px, int py)
+    private void DrawFriends(SpriteBatch sb, Texture2D white, int px, int py)
     {
-        switch (_activeTab)
+        var online = _friends.Count(f => f.Online);
+        _font?.Draw(sb, $"Buddies  {online}/{_friends.Count}", new Vector2(px + ListX, py + 44), new Color(90, 150, 90));
+        DrawRows(sb, white, _friends.Count, _selFriend, px, py, (i, ry, sel) =>
         {
-            case Tab.Friend:
-            case Tab.FriendAll:
-            case Tab.FriendOnline:
-                var showOnline = _activeTab == Tab.FriendOnline;
-                var friends = showOnline ? _friends.Where(f => f.Online).ToList() : _friends;
-                var onlineCount = _friends.Count(f => f.Online);
-                _font?.Draw(sb, $"Online: {onlineCount}/{_friends.Count}",
-                    new Vector2(px + 4, py), new Color(140, 200, 140));
-                DrawFriends(sb, white, friends, px, py + 16);
-                break;
-
-            case Tab.PartyMine:
-                DrawParty(sb, white, px, py);
-                break;
-
-            case Tab.Guild:
-                DrawGuild(sb, white, px, py);
-                break;
-
-            case Tab.Blacklist:
-                DrawSimpleList(sb, white, _blacklist, px, py);
-                break;
-
-            default:
-                _font?.Draw(sb, "(No data)", new Vector2(px + 60, py + 80), new Color(90, 90, 100));
-                break;
-        }
-    }
-
-    private void DrawFriends(SpriteBatch sb, Texture2D white,
-        IList<FriendEntry> list, int px, int py)
-    {
-        var start = Math.Max(0, Math.Min(_scroll, list.Count - ListRows));
-        for (var i = 0; i < ListRows && start + i < list.Count; i++)
-        {
-            var f = list[start + i];
-            var ry = py + i * EntryH;
-            var row = new Rectangle(px + 2, ry, PanelW - 4, EntryH - 2);
-            sb.Draw(white, row, i % 2 == 0 ? new Color(18, 22, 36) : new Color(22, 26, 42));
-
-            var dotColor = f.Online ? new Color(80, 220, 80) : new Color(120, 120, 120);
-            sb.Draw(white, new Rectangle(px + 5, ry + 8, 8, 8), dotColor);
-
-            _font?.Draw(sb, f.Name, new Vector2(px + 18, ry + 4), f.Online ? Color.White : new Color(140, 140, 140));
-            _font?.Draw(sb, f.Location, new Vector2(px + 18, ry + 14),  new Color(140, 160, 200));
-        }
+            var f = _friends[i];
+            sb.Draw(white, new Rectangle(px + ListX + 2, ry + 8, 8, 8), f.Online ? new Color(80, 200, 80) : new Color(120, 120, 120));
+            _font?.Draw(sb, f.Name, new Vector2(px + ListX + 16, ry + 3), f.Online ? new Color(40, 36, 30) : new Color(120, 120, 120));
+            _font?.Draw(sb, f.Online ? f.Location : "Offline", new Vector2(px + ListX + 16, ry + 16), new Color(120, 130, 160));
+            if (f.Level > 0) _font?.Draw(sb, $"Lv.{f.Level} {f.Job}", new Vector2(px + ListW - 84, ry + 16), new Color(150, 140, 110));
+        });
     }
 
     private void DrawParty(SpriteBatch sb, Texture2D white, int px, int py)
     {
-        if (_party.Count == 0)
+        if (_party.Count == 0) { _font?.Draw(sb, "Not in a party.", new Vector2(px + 60, py + 150), new Color(120, 120, 130)); return; }
+        DrawRows(sb, white, _party.Count, _selParty, px, py, (i, ry, sel) =>
         {
-            _font?.Draw(sb, "Not in a party.", new Vector2(px + 40, py + 60), new Color(100, 100, 110));
-            return;
-        }
-        for (var i = 0; i < _party.Count && i < 6; i++)
-        {
-            var p   = _party[i];
-            var ry  = py + i * 50;
-            var row = new Rectangle(px + 2, ry, PanelW - 4, 46);
-            sb.Draw(white, row, i % 2 == 0 ? new Color(18, 22, 36) : new Color(22, 26, 42));
-            _font?.Draw(sb, $"Lv.{p.Level} {p.Name}", new Vector2(px + 6, ry + 4), Color.White);
-            _font?.Draw(sb, p.Job, new Vector2(px + 6, ry + 16), new Color(160, 180, 220));
-            // Mini HP bar
-            var hpR = new Rectangle(px + 6, ry + 32, PanelW - 16, 8);
-            sb.Draw(white, hpR, new Color(0, 0, 0, 140));
-            var fill = new Rectangle(hpR.X, hpR.Y, (int)(hpR.Width * p.HpPct / 100f), hpR.Height);
-            sb.Draw(white, fill, new Color(200, 50, 50));
-        }
+            var p = _party[i];
+            _font?.Draw(sb, $"Lv.{p.Level} {p.Name}", new Vector2(px + ListX + 4, ry + 2), new Color(40, 36, 30));
+            _font?.Draw(sb, p.Job, new Vector2(px + ListX + 4, ry + 15), new Color(120, 130, 160));
+            var hp = new Rectangle(px + ListW - 90, ry + 16, 84, 7);
+            sb.Draw(white, hp, new Color(0, 0, 0, 120));
+            sb.Draw(white, new Rectangle(hp.X, hp.Y, hp.Width * Math.Clamp(p.HpPct, 0, 100) / 100, hp.Height), new Color(200, 60, 60));
+        });
     }
 
-    private void DrawGuild(SpriteBatch sb, Texture2D white, int px, int py)
+    private void DrawGuildList(SpriteBatch sb, Texture2D white, int px, int py, string name, List<GuildEntry> list, string empty)
     {
-        if (_guild.Count == 0)
+        if (!string.IsNullOrEmpty(name)) _font?.Draw(sb, name, new Vector2(px + ListX, py + 44), new Color(200, 170, 90));
+        if (list.Count == 0) { _font?.Draw(sb, empty, new Vector2(px + 36, py + 150), new Color(120, 120, 130)); return; }
+        DrawRows(sb, white, list.Count, -1, px, py, (i, ry, sel) =>
         {
-            _font?.Draw(sb, "Not in a guild.", new Vector2(px + 40, py + 60), new Color(100, 100, 110));
-            return;
-        }
-        // Guild name header
-        _font?.Draw(sb, _guildName, new Vector2(px + 6, py), new Color(220, 200, 120));
-        py += 16;
-        for (var i = 0; i < Math.Min(_guild.Count, ListRows - 1); i++)
-        {
-            var g   = _guild[i];
-            var ry  = py + i * EntryH;
-            sb.Draw(white, new Rectangle(px + 2, ry, PanelW - 4, EntryH - 2),
-                i % 2 == 0 ? new Color(18, 22, 36) : new Color(22, 26, 42));
-            var dot = g.Online ? new Color(80, 220, 80) : new Color(100, 100, 100);
-            sb.Draw(white, new Rectangle(px + 5, ry + 8, 8, 8), dot);
-            _font?.Draw(sb, g.Name, new Vector2(px + 18, ry + 4), Color.White);
-            _font?.Draw(sb, g.Rank, new Vector2(px + 18, ry + 14), new Color(180, 160, 100));
-        }
+            var g = list[i];
+            sb.Draw(white, new Rectangle(px + ListX + 2, ry + 8, 8, 8), g.Online ? new Color(80, 200, 80) : new Color(120, 120, 120));
+            _font?.Draw(sb, g.Name, new Vector2(px + ListX + 16, ry + 3), g.Online ? new Color(40, 36, 30) : new Color(120, 120, 120));
+            _font?.Draw(sb, g.Rank, new Vector2(px + ListX + 16, ry + 16), new Color(160, 140, 90));
+        });
     }
 
-    private void DrawSimpleList(SpriteBatch sb, Texture2D white, IList<string> list, int px, int py)
+    private void DrawBlacklist(SpriteBatch sb, Texture2D white, int px, int py)
     {
-        for (var i = 0; i < Math.Min(list.Count, ListRows); i++)
-            _font?.Draw(sb, list[i], new Vector2(px + 6, py + i * EntryH + 6), new Color(200, 150, 150));
-        if (list.Count == 0)
-            _font?.Draw(sb, "(Empty)", new Vector2(px + 60, py + 60), new Color(90, 90, 100));
+        if (_blacklist.Count == 0) { _font?.Draw(sb, "Block list is empty.", new Vector2(px + 50, py + 150), new Color(120, 120, 130)); return; }
+        DrawRows(sb, white, _blacklist.Count, _selBlack, px, py, (i, ry, sel) =>
+            _font?.Draw(sb, _blacklist[i], new Vector2(px + ListX + 8, ry + 8), new Color(190, 120, 120)));
     }
 
-    // ── Input ─────────────────────────────────────────────────────────────────
+    private void DrawRows(SpriteBatch sb, Texture2D white, int count, int selected, int px, int py, Action<int, int, bool> drawRow)
+    {
+        var maxSc = Math.Max(0, count - VisibleRows);
+        _scroll = Math.Clamp(_scroll, 0, maxSc);
+        for (var r = 0; r < VisibleRows; r++)
+        {
+            var i = _scroll + r;
+            if (i >= count) break;
+            var ry = py + ListTop + r * EntryH;
+            var rowR = new Rectangle(px + ListX, ry, ListW, EntryH - 2);
+            if (i == selected) sb.Draw(white, rowR, new Color(255, 245, 200, 90));
+            else if (r % 2 == 1) sb.Draw(white, rowR, new Color(0, 0, 0, 18));
+            drawRow(i, ry, i == selected);
+        }
+        if (_scroll > 0)        _font?.Draw(sb, "▲", new Vector2(px + PanelW / 2f - 4, py + ListTop - 12), new Color(180, 180, 200));
+        if (_scroll < maxSc)    _font?.Draw(sb, "▼", new Vector2(px + PanelW / 2f - 4, py + ListBottom), new Color(180, 180, 200));
+    }
 
+    // ── Action bar (clean text buttons) ───────────────────────────────────────────
+    private (string label, Action act)[] TabButtons() => _activeTab switch
+    {
+        Tab.Friend => new (string, Action)[]
+        {
+            ("Add",    () => { var n = TakeName(); if (n.Length > 0) OnAddFriend?.Invoke(n); }),
+            ("Invite", () => { if (_selFriend >= 0 && _selFriend < _friends.Count) OnPartyInvite?.Invoke(_friends[_selFriend].Name); }),
+            ("Delete", () => { if (_selFriend >= 0 && _selFriend < _friends.Count) OnDeleteFriend?.Invoke(_friends[_selFriend].FriendId); }),
+            ("Chat",   () => OnGroupChatHint?.Invoke(0)),
+        },
+        Tab.Party => new (string, Action)[]
+        {
+            ("Create", () => OnPartyCreate?.Invoke()),
+            ("Invite", () => { var n = TakeName(); if (n.Length > 0) OnPartyInvite?.Invoke(n); }),
+            ("Kick",   () => { if (_selParty >= 0 && _selParty < _party.Count) OnPartyKick?.Invoke(_party[_selParty].CharId); }),
+            ("Leave",  () => OnPartyLeave?.Invoke()),
+            ("Chat",   () => OnGroupChatHint?.Invoke(1)),
+        },
+        Tab.Guild => new (string, Action)[]
+        {
+            ("Leave", () => OnGuildLeave?.Invoke()),
+            ("Chat",  () => OnGroupChatHint?.Invoke(2)),
+        },
+        Tab.Alliance => new (string, Action)[]
+        {
+            ("Chat", () => OnGroupChatHint?.Invoke(3)),
+        },
+        Tab.Blacklist => new (string, Action)[]
+        {
+            ("Block",   () => { var n = TakeName(); if (n.Length > 0 && !_blacklist.Contains(n)) _blacklist.Add(n); }),
+            ("Unblock", () => { if (_selBlack >= 0 && _selBlack < _blacklist.Count) { _blacklist.RemoveAt(_selBlack); _selBlack = -1; } }),
+        },
+        _ => Array.Empty<(string, Action)>(),
+    };
+
+    private bool NeedsNameField() => _activeTab is Tab.Friend or Tab.Party or Tab.Blacklist;
+
+    private string TakeName()
+    {
+        var n = _nameField.Text.Trim();
+        _nameField.Clear();
+        return n;
+    }
+
+    private const int BtW = 52, BtH = 18, BtGap = 4;
+
+    private Rectangle ActionBtnRect(int i)
+    {
+        var x = (int)Position.X + ListX + i * (BtW + BtGap);
+        var y = (int)Position.Y + PanelH - (NeedsNameField() ? 48 : 26);
+        return new Rectangle(x, y, BtW, BtH);
+    }
+
+    private void DrawActionBar(SpriteBatch sb, Texture2D white)
+    {
+        var btns = TabButtons();
+        var m = Mouse.GetState();
+        for (var i = 0; i < btns.Length; i++)
+        {
+            var r = ActionBtnRect(i);
+            var hover = r.Contains(m.X, m.Y);
+            sb.Draw(white, r, hover ? new Color(95, 110, 150) : new Color(60, 70, 100));
+            DrawBorder(sb, white, r, new Color(120, 130, 165));
+            if (_font != null)
+            {
+                var sz = _font.Measure(btns[i].label);
+                _font.Draw(sb, btns[i].label, new Vector2(r.X + (BtW - sz.X) / 2f, r.Y + (BtH - _font.LineHeight) / 2f + 1), Color.White);
+            }
+        }
+    }
+
+    // ── Input ──────────────────────────────────────────────────────────────────────
     public override bool HandleMouseButton(int x, int y, bool down)
     {
         if (!IsVisible) return false;
-
         if (_btClose?.HandleMouseButton(x, y, down) == true) return true;
-        foreach (var b in _allButtons)
-            if (b?.HandleMouseButton(x, y, down) == true) return true;
-        _btAddFriend?.HandleMouseButton(x, y, down);
-        _btCreateParty?.HandleMouseButton(x, y, down);
-        _btLeaveParty?.HandleMouseButton(x, y, down);
+        if (NeedsNameField() && _nameField.HandleMouseButton(x, y, down)) return true;
+        if (!down) return new Rectangle((int)Position.X, (int)Position.Y, PanelW, PanelH).Contains(x, y);
 
-        var titleBar = new Rectangle((int)Position.X, (int)Position.Y, PanelW, 28);
-        if (down && titleBar.Contains(x, y))
+        // Tab switch.
+        for (var i = 0; i < 6; i++)
+            if (new Rectangle((int)Position.X + TabX[i], (int)Position.Y + TabY, TabW[i], TabH).Contains(x, y))
+            { _activeTab = (Tab)i; _scroll = 0; return true; }
+
+        // Action buttons.
+        var btns = TabButtons();
+        for (var i = 0; i < btns.Length; i++)
+            if (ActionBtnRect(i).Contains(x, y)) { btns[i].act(); return true; }
+
+        // Row selection.
+        var count = RowCount();
+        for (var r = 0; r < VisibleRows; r++)
         {
-            _dragging = true;
-            _dragOff = new Vector2(x - Position.X, y - Position.Y);
+            var idx = _scroll + r;
+            if (idx >= count) break;
+            var ry = (int)Position.Y + ListTop + r * EntryH;
+            if (new Rectangle((int)Position.X + ListX, ry, ListW, EntryH - 2).Contains(x, y)) { Select(idx); return true; }
         }
+
+        // Title-strip drag.
+        if (new Rectangle((int)Position.X, (int)Position.Y, PanelW, 22).Contains(x, y))
+        { _dragging = true; _dragOff = new Vector2(x - Position.X, y - Position.Y); return true; }
+
         return new Rectangle((int)Position.X, (int)Position.Y, PanelW, PanelH).Contains(x, y);
+    }
+
+    private int RowCount() => _activeTab switch
+    {
+        Tab.Friend => _friends.Count,
+        Tab.Party => _party.Count,
+        Tab.Guild => _guild.Count,
+        Tab.Alliance => _alliance.Count,
+        Tab.Blacklist => _blacklist.Count,
+        _ => 0,
+    };
+
+    private void Select(int idx)
+    {
+        switch (_activeTab)
+        {
+            case Tab.Friend: _selFriend = idx; break;
+            case Tab.Party:  _selParty = idx; break;
+            case Tab.Blacklist: _selBlack = idx; break;
+        }
     }
 
     public override bool OnKeyPress(Keys key)
     {
         if (!IsVisible) return false;
+        if (_nameField.IsFocused)
+        {
+            if (key == Keys.Enter)
+            {
+                var btns = TabButtons();
+                if (btns.Length > 0) btns[0].act();   // primary action (Add / Create / Block)
+                return true;
+            }
+            if (key == Keys.Escape) { _nameField.IsFocused = false; return true; }
+            _nameField.OnKeyPress(key, Keyboard.GetState());
+            return true;
+        }
         if (key == Keys.Escape) { IsVisible = false; return true; }
+        if (key == Keys.PageUp)   { _scroll = Math.Max(0, _scroll - VisibleRows); return true; }
+        if (key == Keys.PageDown) { _scroll = Math.Min(Math.Max(0, RowCount() - VisibleRows), _scroll + VisibleRows); return true; }
         return false;
     }
 
-    // ── Helpers ───────────────────────────────────────────────────────────────
-
-    private void LayoutButtons()
-    {
-        if (_btClose       != null) _btClose.Position       = Position + new Vector2(PanelW - 18, 4);
-        if (_btAddFriend   != null) _btAddFriend.Position   = Position + new Vector2(4, PanelH - 24);
-        if (_btCreateParty != null) _btCreateParty.Position = Position + new Vector2(4, PanelH - 24);
-        if (_btLeaveParty  != null) _btLeaveParty.Position  = Position + new Vector2(80, PanelH - 24);
-    }
-
-    private void SeedPlaceholder()
-    {
-        _friends.Add(new FriendEntry { Name = "Artale",  Level = 55, Job = "Wizard",   Location = "Ludus Lake",     Online = true  });
-        _friends.Add(new FriendEntry { Name = "Broa",    Level = 30, Job = "Swordman", Location = "Perion",         Online = true  });
-        _friends.Add(new FriendEntry { Name = "Scania",  Level = 72, Job = "Bowman",   Location = "Aqua Road",      Online = false });
-        _friends.Add(new FriendEntry { Name = "Windia",  Level = 14, Job = "Beginner", Location = "Maple Island",   Online = false });
-        _party.Add  (new PartyEntry  { Name = "Hero",    Level = 1,  Job = "Beginner", HpPct = 100 });
-    }
-
-    private Button? MakeBtn(WzTextureLoader loader, WzProperty? root, string name, Action onClick)
-    {
-        var pr = root?.Get(name) as WzProperty;
-        if (pr is null) return null;
-        var b = new Button(loader, pr) { OnClick = onClick };
-        _allButtons.Add(b);
-        return b;
-    }
+    // ── Helpers ──────────────────────────────────────────────────────────────────
+    private static WzSprite? Canvas(WzTextureLoader loader, WzProperty? root, string name) =>
+        root?.Get(name) is WzCanvas c ? loader.Load(c) : null;
 
     private static void DrawBorder(SpriteBatch sb, Texture2D white, Rectangle r, Color c)
     {
