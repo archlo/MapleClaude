@@ -64,6 +64,7 @@ public sealed class GameStage : Stage
     // Always-visible panels
     private StatusBar? _statusBar;
     private ChatBar? _chatBar;
+    private ChatBalloonLayer? _balloons;
     private MiniMap? _miniMap;
     private BuffList? _buffList;
 
@@ -215,6 +216,8 @@ public sealed class GameStage : Stage
         // UI panels
         _statusBar = new StatusBar(_loader, _ui, font, basicFont) { IsVisible = true };
         _chatBar = new ChatBar(_loader, _ui, font) { IsVisible = true };
+        _balloons = new ChatBalloonLayer(_loader, _ui, font);
+        _chatBar.Bar = _statusBar;   // chat aligns to the status bar's authentic chat-input rect
         _miniMap = new MiniMap(_loader, _ui, font, _logger) { IsVisible = true };
         _buffList = new BuffList(_loader, _ui, font) { IsVisible = true };
         _equip = new EquipInventory(_loader, _ui, font);
@@ -700,6 +703,7 @@ public sealed class GameStage : Stage
                 ? oc.Name
                 : _myName;
             _chatBar?.AddLine($"{speaker} : {args.Text}");
+            _balloons?.Set(args.CharId, args.Text);
         };
 
         // ── Social: group chat / whisper / party / friends ────────────────────
@@ -1289,6 +1293,10 @@ public sealed class GameStage : Stage
         _jumpPressed = _keyConfig!.IsActionDown(kb, KeyConfig.KeyAction.Jump) || imeJump;
         _downPressed = kb.IsKeyDown(Keys.Down);   // prone when grounded + idle
         _upPressed = kb.IsKeyDown(Keys.Up);       // grab + climb ladders / ropes
+        if (TextField.Active != null)             // typing in chat → the keyboard drives text, not the avatar
+        {
+            _moveLeft = _moveRight = _jumpPressed = _downPressed = _upPressed = false;
+        }
 
         // Foothold physics — only when the channel server has sent SetField and
         // a map is loaded. Drives both the CharLook visual position and the
@@ -1298,7 +1306,7 @@ public sealed class GameStage : Stage
             _attackCooldown -= dt;
         }
         // Held-key auto-repeat: holding the attack key re-swings once the per-attack delay has elapsed.
-        if (_physics != null && _attackCooldown <= 0f
+        if (_physics != null && _attackCooldown <= 0f && TextField.Active == null
             && _keyConfig!.IsActionDown(kb, KeyConfig.KeyAction.Attack))
         {
             DoMeleeAttack();
@@ -1400,6 +1408,7 @@ public sealed class GameStage : Stage
 
         // Other players
         foreach (var other in _otherChars.Values) other.Update(dt);
+        _balloons?.Update(dt);
 
         // Damage numbers
         _dmgNumbers?.Update(dt);
@@ -1489,6 +1498,16 @@ public sealed class GameStage : Stage
             var playerScreen = _camera.WorldToScreen(_player.Position);
             _player.Draw(sb, Game.WhitePixel, playerScreen);
         }
+
+        // Chat balloons above the speakers (arrow tip just above each head).
+        _balloons?.Draw(sb, id =>
+        {
+            if (_otherChars.TryGetValue(id, out var oc))
+                return _camera.WorldToScreen(oc.Position) - new Vector2(0, 64);
+            if (_player != null)
+                return _camera.WorldToScreen(_player.Position) - new Vector2(0, 74);
+            return (Vector2?)null;
+        });
 
         // Damage numbers (drawn on top of everything)
         _dmgNumbers?.Draw(sb, Game.WhitePixel, _camera.WorldToScreen);
@@ -1769,6 +1788,9 @@ public sealed class GameStage : Stage
 
         foreach (var p in _panels)
             if (p.IsVisible && p.OnKeyPress(key)) return;
+
+        // While typing in chat, the keyboard drives the text field — don't fire game hotkeys.
+        if (TextField.Active != null) return;
 
         // F12 always opens KeyConfig (meta-key — not itself bindable)
         if (key == Keys.F12) { ToggleKeyConfig(); return; }

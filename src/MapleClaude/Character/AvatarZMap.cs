@@ -45,9 +45,9 @@ public sealed class AvatarZMap
     [
         "weaponOverGlove", "gloveOverHair", "handOverHair", "weaponOverHand", "weaponOverArm",
         "weaponBelowArm", "capOverHair", "hairOverHead", "cap", "hair", "accessoryFace", "face",
-        "hairShade", "head", "cape", "mailArm", "glove", "hand", "arm", "weapon",
+        "hairShade", "backHair", "head", "cape", "mailArm", "glove", "hand", "arm", "weapon",
         "mailArmBelowHead", "armBelowHead", "weaponOverBody", "pantsOverMailChest", "mailChest",
         "shoesOverPants", "pants", "shoes", "gloveOverBody", "body", "capeBelowBody",
-        "hairBelowBody", "weaponBelowBody",
+        "hairBelowBody", "backHairBelowCap", "weaponBelowBody",
     ];
 }

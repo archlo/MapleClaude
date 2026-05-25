@@ -193,6 +193,12 @@ public sealed class StatusBar : GamePanel
     /// <summary>Top-left of the 1024×85 bar in screen space (for manual bar-relative placement).</summary>
     private Vector2 BarTopLeft => new(BarCenterX - 512, _viewH - BarH);
 
+    /// <summary>Screen rect of the chat input box (<c>chatEnter</c>) so the chat bar can place its input
+    /// line on it. Derived from the origin-baked WZ sprite; falls back to the bar's bottom-left.</summary>
+    public Rectangle ChatInputRect => _chatEnter is { } s
+        ? new Rectangle((int)(BarRef.X - s.Origin.X), (int)(BarRef.Y - s.Origin.Y), s.Width, s.Height)
+        : new Rectangle((int)BarTopLeft.X + 8, _viewH - 24, 480, 18);
+
     public override void Relayout(int viewWidth, int viewHeight)
     {
         _viewW = viewWidth;

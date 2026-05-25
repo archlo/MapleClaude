@@ -143,10 +143,27 @@ public sealed class CharacterRenderer
         var hand = LoadPart($"{bodyImg}/{st}/{frame}/hand");
         var head = LoadPart($"{headImg}/{st}/{frame}/head");
         var face = LoadFace(look.Face);
-        var hairBelow = LoadHair(look.Hair, "hairBelowBody", isClimbing ? st : null);
-        var hairShade = LoadHair(look.Hair, "hairShade", isClimbing ? st : null);
-        var hair = LoadHair(look.Hair, "hair", isClimbing ? st : null);
-        var hairOver = LoadHair(look.Hair, "hairOverHead", isClimbing ? st : null);
+        // Hair: front layers normally; on a ladder/rope (back-facing) use the dedicated back-of-head
+        // frames backHairBelowCap (behind the head) + backHair (over it), keyed by the climb stance+frame.
+        AvatarPart? hairBelow, hairShade, hair, hairOver;
+        if (isClimbing)
+        {
+            AvatarPart? BackHair(string part) =>
+                LoadPart($"Hair/{look.Hair:D8}.img/{st}/{frame}/{part}")
+                ?? LoadPart($"Hair/{look.Hair:D8}.img/{st}/0/{part}")
+                ?? LoadPart($"Hair/{look.Hair:D8}.img/backDefault/{part}");
+            hairBelow = BackHair("backHairBelowCap");
+            hair      = BackHair("backHair");
+            hairShade = null;
+            hairOver  = null;
+        }
+        else
+        {
+            hairBelow = LoadHair(look.Hair, "hairBelowBody");
+            hairShade = LoadHair(look.Hair, "hairShade");
+            hair      = LoadHair(look.Hair, "hair");
+            hairOver  = LoadHair(look.Hair, "hairOverHead");
+        }
 
         // Equips (read from the visible-equip map).
         AvatarPart? cape = null, coat = null, coatArm = null, pants = null, shoes = null,
@@ -288,11 +305,9 @@ public sealed class CharacterRenderer
         return arr;
     }
 
-    private AvatarPart? LoadHair(int hairId, string layer, string? climbStance = null) =>
-        // While climbing, prefer the ladder/rope (back-facing) hair frames. Otherwise the still hair layer
-        // is default/<layer> (stand1/0/<layer> is a UOL back to it).
-        (climbStance is not null ? LoadPart($"Hair/{hairId:D8}.img/{climbStance}/0/{layer}") : null)
-        ?? LoadPart($"Hair/{hairId:D8}.img/default/{layer}")
+    private AvatarPart? LoadHair(int hairId, string layer) =>
+        // The still hair layer is default/<layer>; stand1/0/<layer> is a UOL back to it.
+        LoadPart($"Hair/{hairId:D8}.img/default/{layer}")
         ?? LoadPart($"Hair/{hairId:D8}.img/stand1/0/{layer}");
 
     private AvatarPart? LoadEquip(string category, int itemId, string st, int frame, string vslot) =>
