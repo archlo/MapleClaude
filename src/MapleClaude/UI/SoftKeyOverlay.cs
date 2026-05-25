@@ -270,10 +270,22 @@ public sealed class SoftKeyOverlay : Overlay
             }
             if (!string.IsNullOrEmpty(_caption))
             {
-                // Re-enter prompt (mirrors CSoftKeyboardDlg::SetTooltip), drawn in the gap between the
-                // field (ends y≈61) and the keypad (starts y≈94) so it never collides with the baked text.
-                var cw = _font.Measure(_caption).X;
-                _font.Draw(sb, _caption, _boardTL + new Vector2((BoardW - cw) / 2f, 64), new Color(70, 70, 70));
+                // Re-enter prompt (mirrors CSoftKeyboardDlg::SetTooltip). Drawn on its own panel
+                // just below the pad (centred on the board) so it's clearly readable instead of
+                // being cramped, faint, inside the board between the field and the keypad.
+                const int padX = 8, padY = 4, gap = 6;
+                var cw = (int)_font.Measure(_caption).X;
+                var ch = _font.LineHeight;
+                var panelW = cw + padX * 2;
+                var panelH = ch + padY * 2;
+                var panelX = (int)(_boardTL.X + BoardW / 2f - panelW / 2f);
+                var panelY = (int)(_boardTL.Y + BoardH + gap);
+                // If the pad was dragged near the bottom, flip the panel above the board instead.
+                if (panelY + panelH > _screenH) panelY = (int)(_boardTL.Y - gap - panelH);
+                var panel = new Rectangle(panelX, panelY, panelW, panelH);
+                sb.Draw(white, panel, new Color(0, 0, 0, 210));
+                DrawBorder(sb, white, panel, new Color(120, 100, 60));
+                _font.Draw(sb, _caption, new Vector2(panelX + padX, panelY + padY), Color.White);
             }
         }
 
@@ -338,6 +350,14 @@ public sealed class SoftKeyOverlay : Overlay
             _error = string.Empty;
             if (_entered.Length < MaxLength) _entered += character;
         }
+    }
+
+    private static void DrawBorder(SpriteBatch sb, Texture2D white, Rectangle r, Color c)
+    {
+        sb.Draw(white, new Rectangle(r.X, r.Y, r.Width, 1), c);
+        sb.Draw(white, new Rectangle(r.X, r.Bottom - 1, r.Width, 1), c);
+        sb.Draw(white, new Rectangle(r.X, r.Y, 1, r.Height), c);
+        sb.Draw(white, new Rectangle(r.Right - 1, r.Y, 1, r.Height), c);
     }
 
     private static WzSprite? LoadCanvas(WzTextureLoader loader, WzProperty? parent, string name)

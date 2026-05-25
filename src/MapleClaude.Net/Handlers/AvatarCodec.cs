@@ -124,4 +124,26 @@ public static class AvatarCodec
             p.WriteInt(look.PetIds[i]);
         }
     }
+
+    /// <summary>Folds a decoded equipped-inventory list into the visible avatar look. SetField's
+    /// CharacterData carries the full worn inventory (no compact AvatarLook block), so the worn items
+    /// must be mapped into <see cref="AvatarLook.HairEquip"/> for <c>CharacterRenderer</c> to draw them.
+    /// Mirrors upstream Kinoko <c>AvatarLook.getHairEquip/getUnseenEquip</c>: items arrive in wire order
+    /// (normal then cash) keyed by the base body part (cash worn is encoded as <c>bodyPart - CASH_BASE</c>),
+    /// so a later cash item wins the visible slot and the displaced normal item drops to
+    /// <see cref="AvatarLook.UnseenEquip"/>. Non-visible slots are harmless — the renderer ignores body
+    /// parts it doesn't draw.</summary>
+    public static void PopulateEquipsFromInventory(
+        AvatarLook look, IEnumerable<(short Pos, InventoryItem Item)> equipped)
+    {
+        foreach (var (pos, item) in equipped)
+        {
+            int bodyPart = pos;
+            if (look.HairEquip.TryGetValue(bodyPart, out var prev) && prev != item.ItemId)
+            {
+                look.UnseenEquip[bodyPart] = prev;
+            }
+            look.HairEquip[bodyPart] = item.ItemId;
+        }
+    }
 }

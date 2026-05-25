@@ -74,6 +74,7 @@ public sealed class GameStage : Stage
     private StatsInfo? _stats;
     private QuestLog? _quest;
     private KeyConfig? _keyConfig;
+    private QuickSlotConfig? _quickSlotConfig;
     private OptionMenu? _optionMenu;
     private CharInfo? _charInfo;
 
@@ -101,6 +102,8 @@ public sealed class GameStage : Stage
     private bool _moveLeft;
     private bool _moveRight;
     private bool _jumpPressed;
+    private bool _downPressed;
+    private bool _upPressed;
 
     // Network state populated by SetField.
     private FieldScene? _field;
@@ -169,6 +172,7 @@ public sealed class GameStage : Stage
     public override void OnEnter(MapleClaudeGame game)
     {
         base.OnEnter(game);
+        game.ConsumeImeJump();   // discard any stale 한/영 jump request from a prior stage
         _loader = new WzTextureLoader(GraphicsDevice);
 
         // Entering the game enlarges the window from the 800×600 login canvas to
@@ -176,10 +180,14 @@ public sealed class GameStage : Stage
         var pp0 = GraphicsDevice.PresentationParameters;
         _prevW = pp0.BackBufferWidth;
         _prevH = pp0.BackBufferHeight;
-        Game.ResizeWindow(InGameWidth, InGameHeight);
+        // Apply the saved in-game resolution (defaults to 1024×768); the login flow runs at 800×600.
+        var savedRes = Game.Settings.Load();
+        Game.ResizeWindow(savedRes.ResW > 0 ? savedRes.ResW : InGameWidth,
+                          savedRes.ResH > 0 ? savedRes.ResH : InGameHeight);
 
         var pp = GraphicsDevice.PresentationParameters;
         var font = Game.Font;
+        var basicFont = Game.BasicFont;
 
         // Camera — starts at screen centre, follows player
         _camera = new GameCamera(Vector2.Zero)
@@ -205,9 +213,9 @@ public sealed class GameStage : Stage
         SpawnNpc(1052002, new Vector2(400, 0), "Henesys Potion Seller");
 
         // UI panels
-        _statusBar = new StatusBar(_loader, _ui, font) { IsVisible = true };
+        _statusBar = new StatusBar(_loader, _ui, font, basicFont) { IsVisible = true };
         _chatBar = new ChatBar(_loader, _ui, font) { IsVisible = true };
-        _miniMap = new MiniMap(_loader, _ui, font) { IsVisible = true };
+        _miniMap = new MiniMap(_loader, _ui, font, _logger) { IsVisible = true };
         _buffList = new BuffList(_loader, _ui, font) { IsVisible = true };
         _equip = new EquipInventory(_loader, _ui, font);
         _item = new ItemInventory(_loader, _ui, font);
@@ -222,6 +230,8 @@ public sealed class GameStage : Stage
             if (Game.Session.IsConnected) Game.Session.Send(GameSender.QuestResign((short)id));
         };
         _keyConfig = new KeyConfig(_loader, _ui, font);
+        _quickSlotConfig = new QuickSlotConfig(_loader, _ui, font);
+        _keyConfig.OnOpenQuickSlot = () => _quickSlotConfig!.Open();
         _optionMenu = new OptionMenu(_loader, _ui, font);
         _charInfo = new CharInfo(_loader, _ui, font);
         _npcTalk = new NpcTalk(_loader, _ui, font);
@@ -263,17 +273,13 @@ public sealed class GameStage : Stage
         _statusBar.OnSkills  = () => _skill!.IsVisible     = !_skill.IsVisible;
         _statusBar.OnStats   = () => _stats!.IsVisible     = !_stats.IsVisible;
         _statusBar.OnOptions = () => _optionMenu!.IsVisible = !_optionMenu.IsVisible;
-        _statusBar.OnKeys    = () => _keyConfig!.IsVisible  = !_keyConfig.IsVisible;
+        _statusBar.OnKeys    = ToggleKeyConfig;
         _statusBar.OnQuit     = () => _quitConfirm!.IsVisible = true;
         _statusBar.OnCashShop = () => Game.StageDirector.Push(new CashShopStage(
             _loggerFactory.CreateLogger<CashShopStage>(), _ui, Game.Font,
             Game.GraphicsDevice.PresentationParameters.BackBufferWidth,
             Game.GraphicsDevice.PresentationParameters.BackBufferHeight));
-        _statusBar.OnCharacter = () => _stats!.IsVisible   = !_stats.IsVisible;
-        _statusBar.OnMenu    = () => _optionMenu!.IsVisible = !_optionMenu.IsVisible;
-
-        // MiniMap: set map info and initial bounds
-        _miniMap.SetMapInfo(string.Empty, string.Empty, new Rectangle(-3000, -2000, 6000, 4000));
+        _statusBar.OnCharacter = () => _charInfo!.IsVisible = !_charInfo.IsVisible;
 
         _panels.Add(_statusBar);
         _panels.Add(_chatBar);
@@ -285,18 +291,21 @@ public sealed class GameStage : Stage
         _panels.Add(_stats);
         _panels.Add(_quest);
         _panels.Add(_keyConfig);
+        _panels.Add(_quickSlotConfig);
         _panels.Add(_optionMenu);
 
         // ── Persisted settings (keybinds + volumes) ───────────────────────────
         // Disk bindings are applied now; a server-sent keymap (FuncKeyMappedInit)
         // arrives later and overrides them via ApplyServerKeymap — server wins.
         var saved = Game.Settings.Load();
-        _keyConfig.LoadBindings(ParseBindings(saved.KeyBindings));
-        _keyConfig.LoadFuncBinds(ParseFuncBinds(saved.FuncBindings));
+        _keyConfig.ImportMap(ParseMap(saved.FuncKeyMap));
         _optionMenu.LoadVolumes(saved.BgmVolume, saved.SfxVolume);
+        _optionMenu.LoadResolution(saved.ResW, saved.ResH);
         ApplyAudioVolumes();
         _keyConfig.OnBindingsChanged += SaveSettings;
-        _optionMenu.OnSettingsChanged += () => { SaveSettings(); ApplyAudioVolumes(); };
+        _keyConfig.OnSaveToServer += SendFuncKeyMapModified;
+        _optionMenu.OnSettingsChanged += () => { SaveSettings(); ApplyAudioVolumes(); ApplyResolution(_optionMenu.ResW, _optionMenu.ResH); };
+        _optionMenu.OnResolutionChanged += () => ApplyResolution(_optionMenu.ResW, _optionMenu.ResH);
         _panels.Add(_charInfo);
         _panels.Add(_npcTalk);
         _panels.Add(_shop);
@@ -311,7 +320,21 @@ public sealed class GameStage : Stage
         _messenger     = new StatusMessenger(font) { Position = new Vector2(10, 340) };
         _dmgNumbers    = new DamageNumber(font);
 
-        _statusBar.OnCommunity = ToggleCommunityPanel;
+        // Bottom-bar buttons. The Menu / System buttons open authentic pop-up submenus (handled inside
+        // StatusBar); their items route to the panels below.
+        _statusBar.OnQuest   = () => _quest!.IsVisible         = !_quest.IsVisible;
+        _statusBar.OnChannel = () => _channelSelect!.IsVisible = !_channelSelect.IsVisible;
+        _statusBar.OnChat    = () => { };   // chat expand/collapse handled in 23b
+        _statusBar.OnMTS     = () => { };
+        _statusBar.OnClaim   = () => { };
+        // Menu pop-up items (Item/Equip/Stat/Skill/Quest reuse the callbacks wired above).
+        _statusBar.OnCommunity = () => _userList!.IsVisible     = !_userList.IsVisible;
+        _statusBar.OnMessenger = () => _messengerWin!.IsVisible = !_messengerWin.IsVisible;
+        _statusBar.OnRanking   = () => _chatBar?.AddLine("Rankings are not available on this server.", new Color(200, 200, 120));
+        // System pop-up items (Channel reuses OnChannel; KeySetting → OnKeys; Quit → OnQuit).
+        _statusBar.OnGameOption   = () => _optionMenu!.IsVisible = !_optionMenu.IsVisible;
+        _statusBar.OnSystemOption = () => _optionMenu!.IsVisible = !_optionMenu.IsVisible;
+        _statusBar.OnJoyPad       = () => _chatBar?.AddLine("Gamepad is not supported.", new Color(200, 200, 120));
         _chatBar!.OnSendChat = OnChatSubmit;
 
         _channelSelect.OnChannelChange = ch =>
@@ -346,6 +369,7 @@ public sealed class GameStage : Stage
             {
                 _statusBar.Level    = stats.Level;
                 _statusBar.CharName = stats.Name;
+                _statusBar.JobName  = JobName(stats.JobId);
                 _statusBar.Hp       = stats.Hp;   _statusBar.MaxHp = stats.MaxHp;
                 _statusBar.Mp       = stats.Mp;   _statusBar.MaxMp = stats.MaxMp;
                 _statusBar.Exp      = stats.Exp;
@@ -783,11 +807,9 @@ public sealed class GameStage : Stage
             }
         };
 
-        fh.OnFuncKeyMappedInit += entries =>
-        {
-            _keyConfig?.ApplyServerKeymap(
-                entries.Select(e => (e.KeyIndex, (int)e.Type, e.ActionId)));
-        };
+        // Note: the server keymap is applied via _netHandler.OnFuncKeyInit (the
+        // GamePacketHandler decoder, which reads bDefault + 89 correctly). We do not
+        // also wire fh.OnFuncKeyMappedInit here to avoid a double-apply.
 
         Game.AudioPlayer.Stop();
 
@@ -817,6 +839,16 @@ public sealed class GameStage : Stage
         _quitConfirm?.Relayout(w, h);
     }
 
+    /// <summary>Apply a new in-game window resolution live: resize, then re-anchor the HUD. The
+    /// per-frame camera-dimension sync picks up the new viewport. Persisted via SaveSettings.</summary>
+    private void ApplyResolution(int w, int h)
+    {
+        var pp = GraphicsDevice.PresentationParameters;
+        if (pp.BackBufferWidth == w && pp.BackBufferHeight == h) return;
+        Game.ResizeWindow(w, h);
+        RelayoutHud();
+    }
+
     public override void OnExit()
     {
         // Restore the login-flow window size we enlarged from in OnEnter.
@@ -839,6 +871,12 @@ public sealed class GameStage : Stage
             return;
         }
         Game.CharacterId = args.Stat.CharacterId;
+        // SetField's CharacterStat is the authoritative name source (StatChanged may not carry it).
+        if (!string.IsNullOrEmpty(args.Stat.Name))
+        {
+            _myName = args.Stat.Name;
+            if (_statusBar != null) _statusBar.CharName = _myName;
+        }
         if (args.Look is not null && _player is not null && _charRenderer is not null)
         {
             _player.SetAvatar(_charRenderer, args.Look);
@@ -870,14 +908,11 @@ public sealed class GameStage : Stage
                 _player.Position = _physics.Position;
             }
             _camera.Target = _physics.Position;
-            _camera.MapBounds = _field.Info.HasVR
-                ? new Rectangle(_field.Info.VRLeft, _field.Info.VRTop,
-                                _field.Info.VRRight - _field.Info.VRLeft,
-                                _field.Info.VRBottom - _field.Info.VRTop)
-                : _camera.MapBounds;
+            _camera.MapBounds = _field.Bounds;   // VR rect when present, else the foothold AABB (shared with physics)
             PopulateInventory(args);
             PopulateQuests(args);
             UpdateMapName(args.Stat.PosMap);
+            _miniMap?.SetField(_field.MiniMap, _mapStreet, _mapNameText);
             PlayMapBgm(_field.Info.Bgm);
             _logger.LogInformation("SetField processed — mapId={Map} portal={Portal} money={Money}",
                 args.Stat.PosMap, args.Stat.Portal, args.Money);
@@ -1025,39 +1060,40 @@ public sealed class GameStage : Stage
 
     // ── Settings persistence ────────────────────────────────────────────────────
 
-    // Persisted bindings are "<Keys>" → "<KeyAction>" name pairs; parse back to
-    // the live enum map, skipping any entry that no longer resolves.
-    private static Dictionary<Keys, KeyConfig.KeyAction> ParseBindings(Dictionary<string, string> raw)
+    // Persisted func-key map is "<scancode>" → "<typeInt>:<id>"; parse back to a
+    // scancode-indexed FuncKeyMapped array, skipping any entry that won't resolve.
+    private static FuncKeyMapped[] ParseMap(Dictionary<string, string> raw)
     {
-        var map = new Dictionary<Keys, KeyConfig.KeyAction>();
+        var map = new FuncKeyMapped[KeyConfig.MapSize];
         foreach (var (ks, vs) in raw)
         {
-            if (Enum.TryParse<Keys>(ks, out var key) &&
-                Enum.TryParse<KeyConfig.KeyAction>(vs, out var action))
+            var colon = vs.IndexOf(':');
+            if (colon <= 0) continue;
+            if (int.TryParse(ks, out var sc) && sc >= 0 && sc < KeyConfig.MapSize &&
+                int.TryParse(vs.AsSpan(0, colon), out var typeInt) &&
+                int.TryParse(vs.AsSpan(colon + 1), out var id) &&
+                Enum.IsDefined(typeof(FuncKeyType), (byte)typeInt))
             {
-                map[key] = action;
+                map[sc] = new FuncKeyMapped((FuncKeyType)typeInt, id);
             }
         }
         return map;
     }
 
-    // Func bindings persist as "<Keys>" → "<typeInt>:<id>".
-    private static Dictionary<Keys, KeyConfig.FuncBind> ParseFuncBinds(Dictionary<string, string> raw)
+    // Send the changed slots to the server (FuncKeyMappedModified / KeyModified).
+    private void SendFuncKeyMapModified(IReadOnlyList<(int index, FuncKeyMapped fk)> changed)
     {
-        var map = new Dictionary<Keys, KeyConfig.FuncBind>();
-        foreach (var (ks, vs) in raw)
+        if (!Game.Session.IsConnected || changed.Count == 0) return;
+        var p = OutPacket.Of(InHeader.FuncKeyMappedModified);
+        p.WriteInt(0);                 // FuncKeyMappedType.KeyModified
+        p.WriteInt(changed.Count);     // size
+        foreach (var (index, fk) in changed)
         {
-            var colon = vs.IndexOf(':');
-            if (colon <= 0) continue;
-            if (Enum.TryParse<Keys>(ks, out var key) &&
-                int.TryParse(vs.AsSpan(0, colon), out var typeInt) &&
-                int.TryParse(vs.AsSpan(colon + 1), out var id) &&
-                Enum.IsDefined(typeof(KeyConfig.FuncBindType), typeInt))
-            {
-                map[key] = new KeyConfig.FuncBind((KeyConfig.FuncBindType)typeInt, id);
-            }
+            p.WriteInt(index);
+            p.WriteByte((byte)fk.Type);
+            p.WriteInt(fk.Id);
         }
-        return map;
+        Game.Session.Send(p);
     }
 
     private void SaveSettings()
@@ -1065,15 +1101,19 @@ public sealed class GameStage : Stage
         var s = Game.Settings.Load();
         if (_keyConfig != null)
         {
-            s.KeyBindings = _keyConfig.Bindings.ToDictionary(
-                kv => kv.Key.ToString(), kv => kv.Value.ToString());
-            s.FuncBindings = _keyConfig.FuncBinds.ToDictionary(
-                kv => kv.Key.ToString(), kv => $"{(int)kv.Value.Type}:{kv.Value.Id}");
+            var map = _keyConfig.ExportMap();
+            var dict = new Dictionary<string, string>();
+            for (var sc = 0; sc < map.Length; sc++)
+                if (map[sc].IsBound)
+                    dict[sc.ToString()] = $"{(int)map[sc].Type}:{map[sc].Id}";
+            s.FuncKeyMap = dict;
         }
         if (_optionMenu != null)
         {
             s.BgmVolume = _optionMenu.BgmVolume;
             s.SfxVolume = _optionMenu.SfxVolume;
+            s.ResW = _optionMenu.ResW;
+            s.ResH = _optionMenu.ResH;
         }
         Game.Settings.Save(s);
     }
@@ -1226,8 +1266,9 @@ public sealed class GameStage : Stage
         p.WriteByte(_fieldKey);
         p.WriteInt(0);
         p.WriteInt(0);
-        p.WriteInt(0);
-        p.WriteInt(0);
+        p.WriteInt(_field?.Crc ?? 0);   // dwCrc — must match field.getFieldCrc() or the server logs a CRC mismatch
+        p.WriteInt(0);                  // 0
+        p.WriteInt(0);                  // Crc32 (server reads it but does not validate)
         p.WriteBytes(movePathBlob);
         Game.Session.Send(p);
     }
@@ -1244,7 +1285,10 @@ public sealed class GameStage : Stage
         var kb = Keyboard.GetState();
         _moveLeft = _keyConfig!.IsActionDown(kb, KeyConfig.KeyAction.MoveLeft);
         _moveRight = _keyConfig!.IsActionDown(kb, KeyConfig.KeyAction.MoveRight);
-        _jumpPressed = _keyConfig!.IsActionDown(kb, KeyConfig.KeyAction.Jump);
+        var imeJump = Game.ConsumeImeJump();   // the 한/영 / Right-Alt key acts as jump in gameplay
+        _jumpPressed = _keyConfig!.IsActionDown(kb, KeyConfig.KeyAction.Jump) || imeJump;
+        _downPressed = kb.IsKeyDown(Keys.Down);   // prone when grounded + idle
+        _upPressed = kb.IsKeyDown(Keys.Up);       // grab + climb ladders / ropes
 
         // Foothold physics — only when the channel server has sent SetField and
         // a map is loaded. Drives both the CharLook visual position and the
@@ -1253,6 +1297,12 @@ public sealed class GameStage : Stage
         {
             _attackCooldown -= dt;
         }
+        // Held-key auto-repeat: holding the attack key re-swings once the per-attack delay has elapsed.
+        if (_physics != null && _attackCooldown <= 0f
+            && _keyConfig!.IsActionDown(kb, KeyConfig.KeyAction.Attack))
+        {
+            DoMeleeAttack();
+        }
 
         if (_physics != null)
         {
@@ -1260,9 +1310,12 @@ public sealed class GameStage : Stage
             {
                 Left = _moveLeft,
                 Right = _moveRight,
+                Up = _upPressed,
+                Down = _downPressed,
                 JumpPressed = _jumpPressed,
             };
             _physics.Update(input, dt);
+            _charRenderer?.Update(dt);   // advance the face-blink clock
             if (_player != null)
             {
                 _player.Position = _physics.Position;
@@ -1291,6 +1344,22 @@ public sealed class GameStage : Stage
 
         // NPCs
         foreach (var npc in _npcs) npc.Update(dt);
+
+        // Clickable-cursor feedback when the pointer is over an NPC (matches LoginStage's hover).
+        var ms = Mouse.GetState();
+        var overNpc = false;
+        if (_npcTalk?.IsVisible != true)
+        {
+            foreach (var npc in _npcs)
+            {
+                if (npc.GetScreenBounds(_camera.WorldToScreen(npc.Position)).Contains(ms.X, ms.Y))
+                {
+                    overNpc = true;
+                    break;
+                }
+            }
+        }
+        Game.Cursor?.SetHover(overNpc);
 
         // Mobs
         var deadMobs = new List<int>();
@@ -1335,10 +1404,6 @@ public sealed class GameStage : Stage
         // Damage numbers
         _dmgNumbers?.Update(dt);
 
-        // Feed MiniMap map bounds so the coordinate projection matches the camera
-        if (_miniMap != null)
-            _miniMap.SetMapInfo(_mapStreet, _mapNameText, _camera.MapBounds);
-
         // Sync stats to panels
         if (_statusBar != null)
         {
@@ -1347,14 +1412,19 @@ public sealed class GameStage : Stage
             _statusBar.Mp      = _stats?.Mp       ?? 30;
             _statusBar.MaxMp   = _stats?.MaxMp    ?? 30;
             _statusBar.Level   = _stats?.Level    ?? 1;
-            _statusBar.CharName = _charInfo?.CharName ?? "Hero";
+            _statusBar.CharName = _myName;   // authoritative real name (set by SetField/StatChanged)
         }
 
-        // Feed player position + NPC dots to minimap
-        if (_miniMap != null && _player != null)
+        // Feed live entity positions to the minimap (icons are plotted via the map's
+        // miniMap centerX/centerY/mag transform — see MiniMap.DrawMarker).
+        if (_miniMap != null)
         {
-            _miniMap.PlayerWorldPos = _player.Position;
-            _miniMap.SetDots(_npcs.Select(n => (n.Position, new Color(255, 220, 80))));
+            if (_player != null) _miniMap.PlayerWorldPos = _player.Position;
+            _miniMap.SetNpcs(_npcs.Select(n => n.Position));
+            _miniMap.SetOtherPlayers(_otherChars.Values.Select(o => o.Position));
+            _miniMap.SetPortals(_field is { } f
+                ? f.Portals.Values.Where(p => p.Type == 2).Select(p => p.Position)
+                : Enumerable.Empty<Vector2>());
         }
 
         // Panels
@@ -1701,33 +1771,41 @@ public sealed class GameStage : Stage
             if (p.IsVisible && p.OnKeyPress(key)) return;
 
         // F12 always opens KeyConfig (meta-key — not itself bindable)
-        if (key == Keys.F12) { _keyConfig!.IsVisible = !_keyConfig.IsVisible; return; }
+        if (key == Keys.F12) { ToggleKeyConfig(); return; }
 
         // Up arrow at a warp portal → travel. Jump is polled separately as a
         // held key, so this discrete press doesn't interfere with jumping.
         if (key == Keys.Up && TryEnterPortal()) return;
 
-        // Skill / item / face keys (the player's func-key bindings) take precedence.
-        if (_keyConfig!.GetFuncBind(key) is { } funcBind) { DispatchFunc(funcBind); return; }
-
-        // All other keys routed through KeyConfig action bindings
-        DispatchAction(_keyConfig!.GetAction(key));
+        // Route the key through its func-key binding (server keymap / editor).
+        DispatchFuncKey(_keyConfig!.ForKey(key));
     }
 
-    // A skill/item/face/macro key binding (from the server keymap or the editor).
-    private void DispatchFunc(KeyConfig.FuncBind bind)
+    private void ToggleKeyConfig()
     {
-        switch (bind.Type)
+        if (_keyConfig!.IsVisible) _keyConfig.IsVisible = false;
+        else _keyConfig.Open();
+    }
+
+    // A pressed key's func-key binding (skill / item / face / menu / action).
+    private void DispatchFuncKey(FuncKeyMapped fk)
+    {
+        switch (fk.Type)
         {
-            case KeyConfig.FuncBindType.Skill:
-                var level = _skill?.LevelOf(bind.Id) ?? 0;
-                if (level > 0) CastSkill(bind.Id, level);
+            case FuncKeyType.Skill:
+                var level = _skill?.LevelOf(fk.Id) ?? 0;
+                if (level > 0) CastSkill(fk.Id, level);
                 break;
-            case KeyConfig.FuncBindType.Item:
-                UseItemById(bind.Id);
+            case FuncKeyType.Item:
+            case FuncKeyType.Effect:
+                UseItemById(fk.Id);
                 break;
-            // Face (emote) and Macro have no sender yet — bindings are stored/shown
-            // but firing them is a follow-up (UserEmotion / macro execution).
+            case FuncKeyType.Menu:
+            case FuncKeyType.BasicAction:
+                DispatchAction((KeyConfig.KeyAction)fk.Id);
+                break;
+            // Faces (BasicMotion/Emotion) and macros are stored/shown/draggable but
+            // firing them is a follow-up (UserEmotion / macro execution).
         }
     }
 
@@ -1749,7 +1827,7 @@ public sealed class GameStage : Stage
             case KeyConfig.KeyAction.Skills:         _skill!.IsVisible         = !_skill.IsVisible;          break;
             case KeyConfig.KeyAction.Stats:          _stats!.IsVisible         = !_stats.IsVisible;          break;
             case KeyConfig.KeyAction.QuestLog:       _quest!.IsVisible         = !_quest.IsVisible;          break;
-            case KeyConfig.KeyAction.MiniMap:        _miniMap!.IsVisible       = !_miniMap.IsVisible;        break;
+            case KeyConfig.KeyAction.MiniMap:        _miniMap!.CycleMode();                                  break;
             case KeyConfig.KeyAction.WorldMap:       _worldMap!.IsVisible      = !_worldMap.IsVisible;       break;
             case KeyConfig.KeyAction.KeyBindings:    _keyConfig!.IsVisible     = !_keyConfig.IsVisible;      break;
             case KeyConfig.KeyAction.CharInfo:       _charInfo!.IsVisible      = !_charInfo.IsVisible;       break;

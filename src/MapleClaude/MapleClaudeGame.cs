@@ -77,6 +77,12 @@ public sealed class MapleClaudeGame : Game
     // drive the Han↔Yeong toggle from raw key messages. See InitializeImeSupport.
     private ImeWindowHook? _imeHook;
 
+    // The IME/Hangul key (한/영) acts as a jump in gameplay (no text field focused). The hook sets this
+    // one-shot request because the key is a tap MonoGame doesn't surface as a held key for polling.
+    private bool _imeJumpRequested;
+    internal void RequestImeJump() => _imeJumpRequested = true;
+    public bool ConsumeImeJump() { var r = _imeJumpRequested; _imeJumpRequested = false; return r; }
+
     /// <summary>The cursor overlay. Public so stages can call <see cref="MapleCursor.SetHover"/>.</summary>
     public MapleCursor? Cursor => _cursor;
 
@@ -212,13 +218,14 @@ public sealed class MapleClaudeGame : Game
         _white = new Texture2D(GraphicsDevice, 1, 1, mipmap: false, SurfaceFormat.Color);
         _white.SetData([Color.White]);
 
-        // Runtime bitmap font. Malgun Gothic ships with Windows 7+ and has
-        // full Hangul + Latin coverage so typed Korean (IME-composed) renders
-        // alongside English. Non-ASCII glyphs are rasterised lazily on first
-        // use, so startup stays fast even though Hangul has 11 172 syllables.
+        // Runtime bitmap font. Tahoma is the v95 client's basic UI font face — clean and very readable
+        // at small sizes. Malgun Gothic is the fallback for non-Latin glyphs (typed Hangul/CJK in chat),
+        // which Tahoma doesn't cover; those are rasterised lazily on first use, so startup stays fast
+        // even though Hangul has 11 172 syllables. Plain antialiasing (NOT grid-fit, which pushes the
+        // glyph ascender above y=0 and clips the top of every letter under GenericTypographic).
         try
         {
-            _font = new UI.BuiltInFont(GraphicsDevice, "Malgun Gothic", 11f);
+            _font = new UI.BuiltInFont(GraphicsDevice, "Tahoma", 11f, fallbackFamily: "Malgun Gothic");
         }
         catch
         {
@@ -232,16 +239,18 @@ public sealed class MapleClaudeGame : Game
             }
         }
 
-        // Authentic small UI label font: Arial 12px (the v95 FONT_BASIC face/size), grid-fit hinted
-        // for sharpness at small sizes. Falls back to the main font if Arial is unavailable.
+        // Small UI/status font: Tahoma 12px (the v95 basic UI font face), plain antialiasing (NOT
+        // grid-fit, which clips glyph tops under GenericTypographic). Used at native scale for the
+        // status-bar name/job so they stay crisp; Malgun Gothic backs non-Latin glyphs.
         try
         {
-            _basicFont = new UI.BuiltInFont(GraphicsDevice, "Arial", 12f,
-                System.Drawing.GraphicsUnit.Pixel, System.Drawing.Text.TextRenderingHint.AntiAliasGridFit);
+            _basicFont = new UI.BuiltInFont(GraphicsDevice, "Tahoma", 12f,
+                System.Drawing.GraphicsUnit.Pixel, System.Drawing.Text.TextRenderingHint.AntiAlias,
+                fallbackFamily: "Malgun Gothic");
         }
         catch (Exception ex)
         {
-            _logger.LogWarning(ex, "Failed to build Arial basic font — falling back to main font");
+            _logger.LogWarning(ex, "Failed to build Tahoma basic font — falling back to main font");
             _basicFont = _font;
         }
 
@@ -509,10 +518,20 @@ public sealed class MapleClaudeGame : Game
                     // (lParam bit 24) set; left Alt does not. Also accept the dedicated
                     // Korean key (VK_HANGUL) and a direct VK_RMENU if a config sends it.
                     var extended = (m.LParam.ToInt64() & 0x0100_0000) != 0;
-                    if (vk == VkHangul || vk == VkRMenu || (vk == VkMenu && extended))
+                    var imeKey = vk == VkHangul || vk == VkRMenu || (vk == VkMenu && extended);
+                    if (imeKey)
                     {
-                        _owner._logger.LogInformation("IME hook: toggle key down vk=0x{Vk:X} ext={Ext}", vk, extended);
-                        _owner.ToggleNativeIme();
+                        // Toggle Han↔Yeong only while a text field is focused; otherwise the IME/Right-Alt
+                        // key acts as the in-game jump (the hook is the only reliable place that sees it).
+                        if (UI.TextField.Active != null)
+                        {
+                            _owner._logger.LogInformation("IME hook: toggle key down vk=0x{Vk:X} ext={Ext}", vk, extended);
+                            _owner.ToggleNativeIme();
+                        }
+                        else
+                        {
+                            _owner.RequestImeJump();
+                        }
                     }
                     break;
                 }

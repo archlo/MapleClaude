@@ -21,6 +21,7 @@ public sealed class BuiltInFont : IDisposable
 {
     private readonly GraphicsDevice _gd;
     private readonly System.Drawing.Font _sysFont;
+    private readonly System.Drawing.Font? _fallbackFont;
     private readonly System.Drawing.StringFormat _stringFormat;
     private readonly System.Drawing.Text.TextRenderingHint _hint;
     private readonly Texture2D _asciiAtlas;
@@ -31,11 +32,20 @@ public sealed class BuiltInFont : IDisposable
 
     public BuiltInFont(GraphicsDevice gd, string fontFamily = "Malgun Gothic", float emSize = 11f,
         System.Drawing.GraphicsUnit unit = System.Drawing.GraphicsUnit.Point,
-        System.Drawing.Text.TextRenderingHint hint = System.Drawing.Text.TextRenderingHint.AntiAlias)
+        System.Drawing.Text.TextRenderingHint hint = System.Drawing.Text.TextRenderingHint.AntiAlias,
+        string? fallbackFamily = null)
     {
         _gd = gd;
         _hint = hint;
         _sysFont = new System.Drawing.Font(fontFamily, emSize, System.Drawing.FontStyle.Regular, unit);
+        // Optional fallback face for codepoints the primary font lacks (Tahoma has no Hangul, so typed
+        // Korean falls back to Malgun Gothic). Only the lazy non-ASCII path consults it.
+        if (!string.IsNullOrEmpty(fallbackFamily) &&
+            !string.Equals(fallbackFamily, fontFamily, StringComparison.OrdinalIgnoreCase))
+        {
+            try { _fallbackFont = new System.Drawing.Font(fallbackFamily, emSize, System.Drawing.FontStyle.Regular, unit); }
+            catch { _fallbackFont = null; }
+        }
         _stringFormat = System.Drawing.StringFormat.GenericTypographic;
 
         using var measureBmp = new System.Drawing.Bitmap(1, 1);
@@ -56,10 +66,11 @@ public sealed class BuiltInFont : IDisposable
         }
         LineHeight = (int)Math.Ceiling(maxH) + 2;
 
+        const int gap = 3;   // blank columns between atlas cells so a neighbour glyph's side-bearing can't bleed in
         var totalW = 0;
         for (var ch = 32; ch < 128; ch++)
         {
-            totalW += widths[ch];
+            totalW += widths[ch] + gap;
         }
         if (totalW % 4 != 0)
         {
@@ -79,7 +90,7 @@ public sealed class BuiltInFont : IDisposable
                 var w = widths[ch];
                 _asciiGlyphs[ch] = new Rectangle(x, 0, w, LineHeight);
                 g.DrawString(((char)ch).ToString(), _sysFont, brush, x, 0, _stringFormat);
-                x += w;
+                x += w + gap;
             }
         }
         _asciiAtlas = BitmapToTexture(atlasBmp);
@@ -138,7 +149,8 @@ public sealed class BuiltInFont : IDisposable
         using var measureBmp = new System.Drawing.Bitmap(1, 1);
         using var measureG = System.Drawing.Graphics.FromImage(measureBmp);
         measureG.TextRenderingHint = _hint;
-        var sz = measureG.MeasureString(s, _sysFont, System.Drawing.PointF.Empty, _stringFormat);
+        var font = _fallbackFont ?? _sysFont;   // non-ASCII (Hangul/CJK) prefers the fallback face
+        var sz = measureG.MeasureString(s, font, System.Drawing.PointF.Empty, _stringFormat);
         var w = Math.Max(1, (int)Math.Ceiling(sz.Width)) + 2;
         var h = LineHeight;
 
@@ -149,7 +161,7 @@ public sealed class BuiltInFont : IDisposable
             g.TextRenderingHint = _hint;
             g.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.HighQuality;
             using var brush = new System.Drawing.SolidBrush(System.Drawing.Color.White);
-            g.DrawString(s, _sysFont, brush, 0, 0, _stringFormat);
+            g.DrawString(s, font, brush, 0, 0, _stringFormat);
         }
         var tex = BitmapToTexture(bmp);
         return new GlyphEntry(tex, new Rectangle(0, 0, w, h), w);
@@ -220,6 +232,7 @@ public sealed class BuiltInFont : IDisposable
             }
         }
         _sysFont.Dispose();
+        _fallbackFont?.Dispose();
     }
 
     private readonly struct GlyphEntry

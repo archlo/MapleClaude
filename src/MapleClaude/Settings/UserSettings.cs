@@ -7,20 +7,23 @@ namespace MapleClaude.Settings;
 /// (the single-file build keeps trimming off, but source-gen is cleaner and
 /// future-proofs an eventual trim/AOT pass).
 ///
-/// Key bindings are stored as <c>"&lt;Keys&gt;" → "&lt;KeyAction&gt;"</c> name pairs
-/// (e.g. <c>"Z" → "PickUp"</c>) rather than raw integers, so the file stays
-/// human-editable and survives enum re-ordering.
+/// The func-key map is stored as <c>"&lt;scancode&gt;" → "&lt;typeInt&gt;:&lt;id&gt;"</c>
+/// pairs (e.g. <c>"18" → "4:0"</c> = scancode 18 bound to MENU/Equipment), mirroring
+/// the server's <c>FuncKeyMapped</c> model. Only bound slots are written; a
+/// server-sent keymap overrides the file on login.
 /// </summary>
 public sealed class UserSettings
 {
-    public Dictionary<string, string> KeyBindings { get; set; } = new();
-
-    /// <summary>Function-key bindings: <c>"&lt;Keys&gt;" → "&lt;typeInt&gt;:&lt;id&gt;"</c>
-    /// (e.g. <c>"F1" → "1:1001004"</c> for a skill).</summary>
-    public Dictionary<string, string> FuncBindings { get; set; } = new();
+    /// <summary>Func-key map: <c>"&lt;scancode&gt;" → "&lt;typeInt&gt;:&lt;id&gt;"</c>
+    /// (e.g. <c>"57" → "5:54"</c> = Space bound to BASICACTION/Interact).</summary>
+    public Dictionary<string, string> FuncKeyMap { get; set; } = new();
 
     public int BgmVolume { get; set; } = 80;
     public int SfxVolume { get; set; } = 100;
+
+    /// <summary>In-game window resolution (the login flow always runs at 800×600).</summary>
+    public int ResW { get; set; } = 1024;
+    public int ResH { get; set; } = 768;
 
     /// <summary>UI language code; selects the <c>strings.&lt;lang&gt;.csv</c> pack
     /// (defaults to English, which is always bundled).</summary>

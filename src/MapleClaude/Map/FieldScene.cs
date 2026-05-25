@@ -24,7 +24,10 @@ public sealed class FieldScene
     private readonly WzTextureLoader _loader;
     private readonly Dictionary<int, Foothold> _footholds = new();
     private readonly Dictionary<int, Portal> _portals = new();
+    private readonly List<LadderRope> _ladderRopes = new();
     private MapInfo _info = new();
+    private Rectangle _bounds = new(-3000, -2000, 6000, 4000);
+    private MiniMapData? _miniMap;
 
     // Render data (loaded once per map, drawn every frame against the camera).
     private readonly List<BackDraw> _backs = new();
@@ -64,8 +67,20 @@ public sealed class FieldScene
 
     public Camera2D Camera { get; } = new();
     public MapInfo Info => _info;
+
+    /// <summary>The player's movement bounds + camera clamp rect: the map's VR (visual range) rectangle
+    /// when the <c>info</c> node defines one, otherwise the foothold bounding box (so a VR-less map still
+    /// confines the player). Computed once in <see cref="Load"/>.</summary>
+    public Rectangle Bounds => _bounds;
     public IReadOnlyDictionary<int, Foothold> Footholds => _footholds;
     public IReadOnlyDictionary<int, Portal> Portals => _portals;
+
+    /// <summary>The map's rendered minimap bitmap + transform metadata. Null when the map has none.</summary>
+    public MiniMapData? MiniMap => _miniMap;
+
+    /// <summary>Field CRC matching kinoko <c>field.getFieldCrc()</c>, sent as <c>UserMove</c>'s dwCrc so
+    /// the channel server doesn't log a CRC mismatch. 0 until <see cref="Load"/> has run.</summary>
+    public int Crc { get; private set; }
 
     public FieldScene(ILogger<FieldScene> logger, WzPackage mapWz, WzTextureLoader loader)
     {
@@ -85,9 +100,15 @@ public sealed class FieldScene
             return;
         }
         var root = img.Root;
+        try { Crc = FieldCrc.Compute(mapId, root, _mapWz); }
+        catch (Exception ex) { _logger.LogWarning(ex, "FieldCrc compute failed for map {Id}", mapId); Crc = 0; }
         LoadInfo(root);
+        LoadMiniMap(root);
         LoadFootholds(root);
+        AssignZMass();
+        ComputeBounds();
         LoadPortals(root);
+        LoadLadderRope(root);
         try
         {
             LoadBackgrounds(root);
@@ -129,6 +150,37 @@ public sealed class FieldScene
             VRTop = ReadInt(info, "VRTop"),
             VRRight = ReadInt(info, "VRRight"),
             VRBottom = ReadInt(info, "VRBottom"),
+        };
+    }
+
+    // Parse the top-level "miniMap" node (sibling of "info"): the rendered minimap
+    // bitmap + the centerX/centerY/mag transform used to plot markers on it.
+    private void LoadMiniMap(WzProperty root)
+    {
+        if (root.Get("miniMap") is not WzProperty mm)
+        {
+            return;
+        }
+        var canvas = mm.Get("canvas") as WzCanvas;
+
+        // info/mapMark names the region emblem at MapHelper.img/mark/<name> (e.g. "Henesys",
+        // "MushroomVillage"), drawn at the minimap's top-left.
+        WzSprite? mark = null;
+        if ((root.Get("info") as WzProperty)?.Get("mapMark")?.ToString() is { Length: > 0 } markName
+            && _mapWz.GetItem($"MapHelper.img/mark/{markName}") is WzCanvas markCanvas)
+        {
+            mark = _loader.Load(markCanvas);
+        }
+
+        _miniMap = new MiniMapData
+        {
+            Canvas  = canvas is null ? null : _loader.Load(canvas),
+            Mark    = mark,
+            Width   = ReadInt(mm, "width"),
+            Height  = ReadInt(mm, "height"),
+            CenterX = ReadInt(mm, "centerX"),
+            CenterY = ReadInt(mm, "centerY"),
+            Mag     = Math.Max(0, ReadInt(mm, "mag")),
         };
     }
 
@@ -204,6 +256,31 @@ public sealed class FieldScene
                 Delay = ReadInt(entry, "delay"),
                 OnlyOnce = ReadInt(entry, "onlyOnce") != 0,
             };
+        }
+    }
+
+    private void LoadLadderRope(WzProperty root)
+    {
+        if (root.Get("ladderRope") is not WzProperty lrRoot)
+        {
+            return;
+        }
+        foreach (var (snStr, node) in lrRoot.Items)
+        {
+            if (node is not WzProperty entry)
+            {
+                continue;
+            }
+            _ladderRopes.Add(new LadderRope
+            {
+                Sn = int.TryParse(snStr, out var v) ? v : 0,
+                IsLadder = ReadInt(entry, "l") != 0,
+                UpperFoothold = ReadInt(entry, "uf") != 0,
+                X = ReadInt(entry, "x"),
+                Y1 = ReadInt(entry, "y1"),
+                Y2 = ReadInt(entry, "y2"),
+                Page = ReadInt(entry, "page"),
+            });
         }
     }
 
@@ -313,11 +390,35 @@ public sealed class FieldScene
         }
 
         foreach (var b in _fronts) DrawBackground(sb, b, center, screenWidth, screenHeight);
+
+        // Debug foothold overlay (MAPLECLAUDE_DEBUG): floors green, walls red; blue channel encodes the WZ
+        // layer (page) so it can be cross-checked against a WZ editor's per-layer views.
+        if (Debug.DebugLauncher.IsEnabled)
+        {
+            foreach (var (_, fh) in _footholds)
+            {
+                var p1 = WorldToScreen(fh.X1, fh.Y1, center);
+                var p2 = WorldToScreen(fh.X2, fh.Y2, center);
+                var blue = (byte)Math.Min(255, fh.Layer * 60);   // layer 0→0, 2→120, 4→240
+                var col = fh.IsWall ? new Color((byte)255, (byte)70, blue) : new Color((byte)70, (byte)220, blue);
+                DrawDebugLine(sb, whitePixel, p1, p2, col, 2f);
+            }
+        }
     }
 
     // Matches GameCamera.WorldToScreen so the map aligns with mobs/drops/player.
     private Vector2 WorldToScreen(float worldX, float worldY, Vector2 center) =>
         new(worldX - Camera.Position.X + center.X, worldY - Camera.Position.Y + center.Y);
+
+    // Debug helper: draw a thin line from a to b by stretching+rotating the 1×1 white pixel.
+    private static void DrawDebugLine(SpriteBatch sb, Texture2D white, Vector2 a, Vector2 b, Color c, float thickness)
+    {
+        var d = b - a;
+        var len = d.Length();
+        if (len < 0.01f) { sb.Draw(white, new Rectangle((int)a.X - 1, (int)a.Y - 1, 3, 3), c); return; }
+        var angle = MathF.Atan2(d.Y, d.X);
+        sb.Draw(white, a, null, c, angle, new Vector2(0f, 0.5f), new Vector2(len, thickness), SpriteEffects.None, 0f);
+    }
 
     private void DrawBackground(SpriteBatch sb, BackDraw b, Vector2 center, int w, int h)
     {
@@ -364,6 +465,112 @@ public sealed class FieldScene
         }
     }
 
+    /// <summary>Foothold by id, or null.</summary>
+    public Foothold? GetFoothold(int id) => _footholds.TryGetValue(id, out var fh) ? fh : null;
+
+    /// <summary>The nearest standable floor at or below <paramref name="y"/> directly under
+    /// <paramref name="x"/> — the foothold a falling or spawning character should land on. Skips walls
+    /// (vertical footholds, X1==X2). Returns null when there is no ground below the point.</summary>
+    public Foothold? GetFootholdBelow(float x, float y)
+    {
+        Foothold? best = null;
+        var bestY = float.PositiveInfinity;
+        foreach (var (_, fh) in _footholds)
+        {
+            if (fh.X1 == fh.X2) continue;           // wall, not ground
+            if (fh.YAt(x) is not { } gy) continue;  // x outside this segment
+            if (gy >= y && gy < bestY) { bestY = gy; best = fh; }
+        }
+        return best;
+    }
+
+    /// <summary>The ladder/rope the character at (<paramref name="x"/>, <paramref name="y"/>) can grab —
+    /// x within ±10 of the ladder's X and y inside its [Top-12, Bottom+12] span (mirrors the v95
+    /// <c>CWvsPhysicalSpace2D::GetLadderOrRope</c> ±10 x-tolerance). Null when none is in reach.</summary>
+    public LadderRope? GetLadderOrRope(float x, float y)
+    {
+        foreach (var lr in _ladderRopes)
+        {
+            if (Math.Abs(x - lr.X) <= 10f && y >= lr.Top - 12f && y <= lr.Bottom + 12f)
+            {
+                return lr;
+            }
+        }
+        return null;
+    }
+
+    /// <summary>Assign each foothold a "ZMass" = a unique id per WZ <c>(Layer, Group)</c> pair. This
+    /// mirrors the authentic client exactly: <c>CWvsPhysicalSpace2D::Load</c> feeds
+    /// <c>CStaticFoothold::m_lZMass</c> straight from the WZ foothold tree (page = the <c>&lt;layer&gt;</c>,
+    /// ZMass = the <c>&lt;group&gt;</c>) — there is NO prev/next flood-fill. Wall collision gates on ZMass,
+    /// so a wall only blocks an entity whose current foothold shares its (layer, group): a cliff face on a
+    /// different page never blocks a player standing on another platform. Run once after
+    /// <see cref="LoadFootholds"/>.</summary>
+    private void AssignZMass()
+    {
+        var groups = new Dictionary<(int Layer, int Group), int>();
+        var next = 0;
+        foreach (var (_, fh) in _footholds)
+        {
+            var key = (fh.Layer, fh.Group);
+            if (!groups.TryGetValue(key, out var z))
+            {
+                groups[key] = z = ++next;
+            }
+            fh.ZMass = z;
+        }
+    }
+
+    /// <summary>X of the nearest wall in connected group <paramref name="zmass"/> that the horizontal sweep
+    /// [<paramref name="fromX"/>→<paramref name="toX"/>] crosses while its Y span overlaps the body
+    /// [<paramref name="yTop"/>, <paramref name="yBottom"/>], or null. Mirrors the authentic client's
+    /// ZMass-gated wall collision: an airborne entity only collides with walls in its own foothold group,
+    /// so a tall wall on another platform never pins the jump, while a same-group wall blocks until the
+    /// feet rise above its top.</summary>
+    public float? GetZMassWallX(int zmass, float fromX, float toX, float yTop, float yBottom)
+    {
+        if (fromX == toX) return null;
+        var movingRight = toX > fromX;
+        float lo = Math.Min(fromX, toX), hi = Math.Max(fromX, toX);
+        float? best = null;
+        foreach (var (_, fh) in _footholds)
+        {
+            if (!fh.IsWall || fh.ZMass != zmass) continue;   // only walls in the entity's connected group
+            float wx = fh.X1;
+            if (wx < lo || wx > hi) continue;                // not in the swept span
+            float wTop = Math.Min(fh.Y1, fh.Y2), wBot = Math.Max(fh.Y1, fh.Y2);
+            if (wBot < yTop || wTop > yBottom) continue;     // doesn't overlap the body
+            if (best is null || (movingRight ? wx < best.Value : wx > best.Value)) best = wx;
+        }
+        return best;
+    }
+
+    /// <summary>Compute <see cref="Bounds"/>: the VR rectangle from the map's <c>info</c> node when present,
+    /// otherwise the foothold bounding box with a small inset (side walls held off, jump headroom above, a
+    /// little slack below so the feet can reach the lowest floor). Leaves the default fallback if the map
+    /// has neither VR nor footholds.</summary>
+    private void ComputeBounds()
+    {
+        if (_info.HasVR)
+        {
+            _bounds = new Rectangle(_info.VRLeft, _info.VRTop,
+                                    _info.VRRight - _info.VRLeft, _info.VRBottom - _info.VRTop);
+            return;
+        }
+        if (_footholds.Count == 0) return;
+        int minX = int.MaxValue, minY = int.MaxValue, maxX = int.MinValue, maxY = int.MinValue;
+        foreach (var (_, fh) in _footholds)
+        {
+            minX = Math.Min(minX, fh.LeftEdgeX);
+            maxX = Math.Max(maxX, fh.RightEdgeX);
+            minY = Math.Min(minY, Math.Min(fh.Y1, fh.Y2));
+            maxY = Math.Max(maxY, Math.Max(fh.Y1, fh.Y2));
+        }
+        minX += 25; maxX -= 25; minY -= 300; maxY += 100;   // inset (matches the classic client's wall/border margins)
+        if (maxX <= minX || maxY <= minY) return;            // degenerate → keep the fallback
+        _bounds = new Rectangle(minX, minY, maxX - minX, maxY - minY);
+    }
+
     public void PlacePlayerAtPortal(PlayerController player, byte portalIndex)
     {
         if (!_portals.TryGetValue(portalIndex, out var portal))
@@ -372,13 +579,14 @@ public sealed class FieldScene
             if (!_portals.TryGetValue(0, out portal))
             {
                 _logger.LogWarning("No portals — spawning player at (0,0)");
-                player.Position = Vector2.Zero;
+                player.Spawn(Vector2.Zero);
                 return;
             }
         }
-        player.Position = portal.Position;
-        Camera.Position = portal.Position;
-        _logger.LogInformation("Player placed at portal {Idx} ({X},{Y})", portalIndex, portal.X, portal.Y);
+        player.Spawn(portal.Position);
+        Camera.Position = player.Position;
+        _logger.LogInformation("Player placed at portal {Idx} ({X},{Y}) -> ground ({GX},{GY})",
+            portalIndex, portal.X, portal.Y, (int)player.Position.X, (int)player.Position.Y);
     }
 
     private static int ReadInt(WzProperty p, string key)

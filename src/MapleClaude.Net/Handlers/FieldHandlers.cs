@@ -252,6 +252,13 @@ public sealed class FieldHandlers
                 p.ReadByte();                       // cash inv size
                 p.ReadLong();                       // aEquipExtExpire (FileTime)
                 args.Inventory = DecodeInventory(p);
+                // Fold worn equips into the avatar look so the local player renders dressed — SetField's
+                // CharacterData has no compact AvatarLook block, only the full equipped inventory.
+                if (args.Look is not null
+                    && args.Inventory.TryGetValue(InventoryType.Equipped, out var worn))
+                {
+                    AvatarCodec.PopulateEquipsFromInventory(args.Look, worn);
+                }
                 args.Skills = DecodeSkillRecords(p); // DBChar.SKILLRECORD section
                 DecodeSkillCooltime(p);              // DBChar.SKILLCOOLTIME (skipped)
                 args.Quests = DecodeQuestRecords(p); // DBChar.QUESTRECORD (in-progress)
@@ -1151,16 +1158,21 @@ public sealed class FieldHandlers
     }
 
     // ── FuncKeyMappedInit ─────────────────────────────────────────────────────
-    // 90 entries: byte type + int actionId
+    // FieldPacket.funcKeyMappedInit: byte bDefault, then FUNC_KEY_MAP_SIZE (89)
+    // entries of (byte type + int actionId) when !bDefault.
 
     private void HandleFuncKeyMappedInit(InPacket p)
     {
-        var entries = new List<FuncKeyEntry>(90);
-        for (var i = 0; i < 90; i++)
+        var isDefault = p.ReadBool();
+        var entries = new List<FuncKeyEntry>(89);
+        if (!isDefault)
         {
-            var type     = p.ReadByte();
-            var actionId = p.ReadInt();
-            entries.Add(new FuncKeyEntry { KeyIndex = i, Type = type, ActionId = actionId });
+            for (var i = 0; i < 89; i++)
+            {
+                var type     = p.ReadByte();
+                var actionId = p.ReadInt();
+                entries.Add(new FuncKeyEntry { KeyIndex = i, Type = type, ActionId = actionId });
+            }
         }
         OnFuncKeyMappedInit?.Invoke(entries);
     }

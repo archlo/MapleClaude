@@ -1,7 +1,6 @@
+using MapleClaude.Domain;
 using MapleClaude.Render;
-using MapleClaude.UI;
 using MapleClaude.Wz;
-using System.Linq;
 using Microsoft.Xna.Framework;
 using Microsoft.Xna.Framework.Graphics;
 using Microsoft.Xna.Framework.Input;
@@ -9,19 +8,23 @@ using Microsoft.Xna.Framework.Input;
 namespace MapleClaude.UI.Game;
 
 /// <summary>
-/// Key-binding configuration panel.
-/// Displays a visual keyboard grid; clicking a slot enters rebind-mode;
-/// pressing any key assigns it. Default button restores GMS v95 defaults.
+/// In-game Key Configuration window — authentic v95 <c>CUIKeyConfig</c>, drawn from
+/// <c>UIWindow.img/KeyConfig</c>. The <c>backgrnd</c> canvas is the whole labelled
+/// keyboard plus the icon-palette grid below it; 32×32 action icons are laid onto
+/// bound keys at the positions from <see cref="KeyConfigLayout"/> (a port of
+/// <c>CalcKeyIconPosInfo</c>). Editing is drag-and-drop: pick an icon out of the
+/// bottom palette and drop it on a key to bind, or drag a key's icon off to unbind.
 ///
-/// KeyAction integer values match the GMS v95 server protocol exactly
-/// (HeavenMS GameConstants DEFAULT_ACTION array). When the keymap packet
-/// arrives from Kinoko, the server-sent action IDs wire straight in.
-///
-/// WZ: UIWindow.img/KeyConfig/
+/// The binding store is the server's model: a <see cref="FuncKeyMapped"/> array
+/// indexed by DInput scancode (89 slots), so <c>FuncKeyMappedInit</c> wires straight
+/// in and <c>FuncKeyMappedModified</c> saves straight out. Arrow-key movement is
+/// client-only and lives outside this map.
 /// </summary>
 public sealed class KeyConfig : GamePanel
 {
-    // ── Action enum — IDs match GMS v95 server protocol ──────────────────────
+    // KeyAction is the dispatch vocabulary used by GameStage. The integer values
+    // are the v95 MENU ids (0..29) and BASICACTION ids (50..54) carried by the
+    // func-key map, so a Menu/BasicAction binding casts straight to a KeyAction.
     public enum KeyAction
     {
         None              = -1,
@@ -49,566 +52,627 @@ public sealed class KeyConfig : GamePanel
         MapleNews         = 21,
         CashShop          = 22,
         AllianceChat      = 23,
-        BuddyChat         = 24,   // action 24 in GMS packet
+        BuddyChat         = 24,
         ManageLegion      = 25,
         Medals            = 26,
         BossParty         = 27,
-        // --- v95-era additions ---
-        ChangeChannel     = 45,
         CharInfo          = 44,
+        ChangeChannel     = 45,
         MainMenu          = 46,
         Screenshot        = 47,
-        MapleStoage       = 200,
-        Mute              = 202,
-        // --- In-game actions ---
+        // In-game actions (BASICACTION ids 50..54)
         PickUp            = 50,
         Sit               = 51,
         Attack            = 52,
         Jump              = 53,
         Interact          = 54,
-        // --- Face expressions ---
-        Face1             = 100,
-        Face2             = 101,
-        Face3             = 102,
-        Face4             = 103,
-        Face5             = 104,
-        Face6             = 105,
-        Face7             = 106,
-        // --- Client-only movement (not in server protocol) ---
+        // Client-only movement (not in the server map)
         MoveLeft          = 1002,
         MoveRight         = 1003,
     }
 
-    // Label shown on each slot in the visual grid
-    private static readonly Dictionary<KeyAction, string> ActionLabel = new()
-    {
-        [KeyAction.Equipment]    = "EQP",   [KeyAction.Items]       = "ITEM",
-        [KeyAction.Stats]        = "STAT",  [KeyAction.Skills]      = "SKIL",
-        [KeyAction.Friends]      = "FRND",  [KeyAction.WorldMap]    = "WMAP",
-        [KeyAction.MapleChat]    = "MCHAT", [KeyAction.MiniMap]     = "MMAP",
-        [KeyAction.QuestLog]     = "QLOG",  [KeyAction.KeyBindings] = "KEYS",
-        [KeyAction.Say]          = "SAY",   [KeyAction.Whisper]     = "WIS",
-        [KeyAction.PartyChat]    = "PCHT",  [KeyAction.FriendsChat] = "FCHT",
-        [KeyAction.Menu]         = "MENU",  [KeyAction.QuickSlots]  = "QS",
-        [KeyAction.ToggleChat]   = "CHAT",  [KeyAction.Guild]       = "GILD",
-        [KeyAction.GuildChat]    = "GCHT",  [KeyAction.Party]       = "PTY",
-        [KeyAction.Notifier]     = "NOTE",  [KeyAction.MapleNews]   = "NEWS",
-        [KeyAction.CashShop]     = "CS",    [KeyAction.AllianceChat]= "ACHT",
-        [KeyAction.BuddyChat]    = "BCHT",  [KeyAction.ManageLegion]= "LGN",
-        [KeyAction.Medals]       = "MDL",   [KeyAction.BossParty]   = "BOSS",
-        [KeyAction.ChangeChannel]= "CH",    [KeyAction.CharInfo]    = "INFO",
-        [KeyAction.MainMenu]     = "HOME",  [KeyAction.Screenshot]  = "SSCR",
-        [KeyAction.Mute]         = "MUTE",
-        [KeyAction.PickUp]       = "PICK",  [KeyAction.Sit]         = "SIT",
-        [KeyAction.Attack]       = "ATK",   [KeyAction.Jump]        = "JUMP",
-        [KeyAction.Interact]     = "NACT",
-        [KeyAction.Face1]        = ":-)",   [KeyAction.Face2]       = ":-D",
-        [KeyAction.Face3]        = ":-O",   [KeyAction.Face4]       = ":-(",
-        [KeyAction.Face5]        = ":-/",   [KeyAction.Face6]       = "B-)",
-        [KeyAction.Face7]        = ":-P",
-        [KeyAction.MoveLeft]     = "←",     [KeyAction.MoveRight]   = "→",
-    };
+    public const int MapSize = 89;
 
-    // ── Binding store ─────────────────────────────────────────────────────────
-    private readonly Dictionary<Keys, KeyAction> _bindings = new();
+    private readonly FuncKeyMapped[] _map = new FuncKeyMapped[MapSize];
+    private readonly FuncKeyMapped[] _mapOnOpen = new FuncKeyMapped[MapSize];
 
-    /// <summary>Live keyboard bindings; consumed by the settings store to persist
-    /// the user's layout.</summary>
-    public IReadOnlyDictionary<Keys, KeyAction> Bindings => _bindings;
+    // ── WZ assets ───────────────────────────────────────────────────────────────
+    private readonly WzTextureLoader _loader;
+    private readonly WzProperty? _kc;            // UIWindow.img/KeyConfig (frame/buttons/key/layout)
+    private readonly WzProperty? _iconRoot;      // UIWindow2.img/KeyConfig/icon (correct v95 action icons)
 
-    /// <summary>Fired when the user finishes editing bindings (panel close /
-    /// reset-to-default), so the host can persist them.</summary>
-    public event Action? OnBindingsChanged;
+    // Menu id 22 is "Monster Book" — a feature v95 removed. UIWindow2 omits the icon; the palette
+    // skips this slot so the dropped feature never surfaces (and we never fall back to UIWindow art).
+    private const int MonsterBookMenuId = 22;
+    // v95 KeyConfig window is layered in UIWindow2: dark outer frame + white inner panel + the
+    // keyboard art (with modern orange labels on the fixed keys). Each layer's origin encodes its
+    // inset from the window top-left. UIWindow's single backgrnd is the last-resort fallback.
+    private readonly WzSprite? _bg;
+    private readonly WzSprite? _bg2;
+    private readonly WzSprite? _bg3;
+    private readonly Dictionary<int, WzSprite?> _iconCache = new();
+    private readonly BuiltInFont? _font;
 
-    /// <summary>Replace the live bindings with a previously-persisted layout.
-    /// A null/empty map is ignored (keeps the GMS defaults).</summary>
-    public void LoadBindings(IReadOnlyDictionary<Keys, KeyAction>? bindings)
-    {
-        if (bindings is null || bindings.Count == 0) return;
-        _bindings.Clear();
-        foreach (var (k, v) in bindings) _bindings[k] = v;
-    }
-
-    private void CloseConfig()
-    {
-        IsVisible = false;
-        _rebindTarget = null;
-        OnBindingsChanged?.Invoke();
-    }
-
-    // ── Function bindings (skills / items / faces / macros bound to keys) ────────
-    // These coexist with the KeyAction bindings above: a key is either a KeyAction
-    // (panel toggle / in-game action / movement) or a FuncBind, never both.
-    public enum FuncBindType { Skill = 1, Item = 2, Face = 6, Macro = 8 }
-
-    public readonly record struct FuncBind(FuncBindType Type, int Id);
-
-    private readonly Dictionary<Keys, FuncBind> _funcBinds = new();
-
-    /// <summary>The skill/item/face/macro bound to a key, if any.</summary>
-    public FuncBind? GetFuncBind(Keys key) => _funcBinds.TryGetValue(key, out var b) ? b : null;
-
-    /// <summary>All function bindings (for persistence + the quick-slot bar).</summary>
-    public IReadOnlyDictionary<Keys, FuncBind> FuncBinds => _funcBinds;
-
-    /// <summary>Replace the live function bindings with a persisted layout.</summary>
-    public void LoadFuncBinds(IReadOnlyDictionary<Keys, FuncBind>? binds)
-    {
-        _funcBinds.Clear();
-        if (binds is null) return;
-        foreach (var (k, v) in binds) _funcBinds[k] = v;
-    }
-
-    // ── Visual keyboard grid ──────────────────────────────────────────────────
-    private static readonly (Keys key, string label)[][] KeyRows =
-    [
-        [ (Keys.Escape,"ESC"),
-          (Keys.F1,"F1"),(Keys.F2,"F2"),(Keys.F3,"F3"),(Keys.F4,"F4"),
-          (Keys.F5,"F5"),(Keys.F6,"F6"),(Keys.F7,"F7"),(Keys.F8,"F8"),
-          (Keys.F9,"F9"),(Keys.F10,"F10"),(Keys.F11,"F11"),(Keys.F12,"F12"),
-          (Keys.PrintScreen,"PRS"),(Keys.Insert,"INS"),(Keys.Home,"HME"),
-          (Keys.PageUp,"PGU") ],
-        [ (Keys.OemTilde,"`"),(Keys.D1,"1"),(Keys.D2,"2"),(Keys.D3,"3"),
-          (Keys.D4,"4"),(Keys.D5,"5"),(Keys.D6,"6"),(Keys.D7,"7"),
-          (Keys.D8,"8"),(Keys.D9,"9"),(Keys.D0,"0"),
-          (Keys.OemMinus,"-"),(Keys.OemPlus,"=") ],
-        [ (Keys.Tab,"TAB"),(Keys.Q,"Q"),(Keys.W,"W"),(Keys.E,"E"),
-          (Keys.R,"R"),(Keys.T,"T"),(Keys.Y,"Y"),(Keys.U,"U"),
-          (Keys.I,"I"),(Keys.O,"O"),(Keys.P,"P"),
-          (Keys.OemOpenBrackets,"["),(Keys.OemCloseBrackets,"]"),
-          (Keys.OemPipe,"\\") ],
-        [ (Keys.CapsLock,"CAP"),(Keys.A,"A"),(Keys.S,"S"),(Keys.D,"D"),
-          (Keys.F,"F"),(Keys.G,"G"),(Keys.H,"H"),(Keys.J,"J"),
-          (Keys.K,"K"),(Keys.L,"L"),
-          (Keys.OemSemicolon,";"),(Keys.OemQuotes,"'"),
-          (Keys.Enter,"ENT") ],
-        [ (Keys.LeftShift,"SHF"),(Keys.Z,"Z"),(Keys.X,"X"),(Keys.C,"C"),
-          (Keys.V,"V"),(Keys.B,"B"),(Keys.N,"N"),(Keys.M,"M"),
-          (Keys.OemComma,","),(Keys.OemPeriod,"."),(Keys.RightShift,"RSH"),
-          (Keys.Up,"↑") ],
-        [ (Keys.LeftControl,"CTR"),(Keys.LeftAlt,"ALT"),
-          (Keys.Space,"SPACE"),
-          (Keys.RightAlt,"RAL"),(Keys.RightControl,"RCT"),
-          (Keys.Left,"←"),(Keys.Down,"↓"),(Keys.Right,"→"),
-          (Keys.End,"END"),(Keys.PageDown,"PGD"),(Keys.Delete,"DEL") ],
-    ];
-
-    // ── UI ────────────────────────────────────────────────────────────────────
-    private readonly WzSprite? _background;
-    private readonly Button?   _btClose;
-    private readonly Button?   _btDefault;
-    private readonly Button?   _btOk;
+    // ── Buttons ───────────────────────────────────────────────────────────────
+    private readonly Button? _btClose, _btHelp, _btOk, _btCancel, _btDefault, _btDelete, _btQuickSlot;
     private readonly List<Button> _allButtons = new();
 
-    private Keys?  _rebindTarget;
+    // ── Drag state ──────────────────────────────────────────────────────────────
+    // Sticky drag: a click picks an icon up; the next click drops it (no holding).
+    private bool _dragActive;
+    private FuncKeyMapped _dragIcon;
+    private int _dragFromScancode = -1;     // -1 = came from palette / nowhere
+    private Point _dragMouse;
 
-    private const int PanelW = 560;
-    private const int PanelH = 340;
-    private const int GridX  = 8;
-    private const int GridY  = 28;
-    private const int SlotW  = 38;
-    private const int SlotH  = 26;
-    private const int SlotGap = 2;
+    // ── Window drag ───────────────────────────────────────────────────────────
+    private bool _windowDrag;
+    private Vector2 _windowDragOff;
 
-    private readonly BuiltInFont? _font;
+    // ── Confirm overlay (Default / Delete) ──────────────────────────────────────
+    private enum Confirm { None, Default, Delete }
+    private Confirm _confirm = Confirm.None;
+
+    private readonly int _panelW;   // window size, from the outer-frame background
+    private readonly int _panelH;
+
+    /// <summary>Persist hook (disk). Fired on OK and on Default/Delete apply.</summary>
+    public event Action? OnBindingsChanged;
+
+    /// <summary>Save-to-server hook: the changed slots since the window opened
+    /// (index + new mapping). Wired by the stage to send <c>FuncKeyMappedModified</c>.</summary>
+    public event Action<IReadOnlyList<(int index, FuncKeyMapped fk)>>? OnSaveToServer;
+
+    /// <summary>Open the QuickSlot key-config sub-panel (BtQuickSlot). Wired by the stage.</summary>
+    public Action? OnOpenQuickSlot;
 
     public KeyConfig(WzTextureLoader loader, WzPackage? ui, BuiltInFont? font)
     {
+        _loader = loader;
         _font = font;
         IsVisible = false;
-        Position = new Vector2(120, 130);
+        Position = new Vector2(200, 150);
 
-        var kc = ui?.GetItem("UIWindow.img/KeyConfig") as WzProperty;
-        _background = kc?.Get("backgrnd") is WzCanvas bc ? loader.Load(bc) : null;
+        _kc = ui?.GetItem("UIWindow.img/KeyConfig") as WzProperty;
+        var kc2 = ui?.GetItem("UIWindow2.img/KeyConfig") as WzProperty;
+        // Action icons + the window background come from UIWindow2 (the modern v95 art). UIWindow's
+        // backgrnd bakes the legacy pink key labels (MENU / MOVE MENU / SCREEN SHOT); UIWindow2 splits
+        // the window into frame + panel + keyboard layers with the modern orange labels. We never fall
+        // back to UIWindow icons — its only extra id is 22 (Monster Book), which v95 dropped.
+        _iconRoot = kc2?.Get("icon") as WzProperty;
+        _bg  = (kc2?.Get("backgrnd") ?? _kc?.Get("backgrnd")) is WzCanvas bc ? loader.Load(bc) : null;
+        _bg2 = kc2?.Get("backgrnd2") is WzCanvas bc2 ? loader.Load(bc2) : null;
+        _bg3 = kc2?.Get("backgrnd3") is WzCanvas bc3 ? loader.Load(bc3) : null;
+        _panelW = _bg?.Width  ?? 622;
+        _panelH = _bg?.Height ?? 374;
 
-        _btClose   = MakeBtn(loader, kc, "BtClose",  CloseConfig);
-        _btDefault = MakeBtn(loader, kc, "BtDefault", () => { ResetToDefault(); OnBindingsChanged?.Invoke(); });
-        _btOk      = MakeBtn(loader, kc, "BtOK",     CloseConfig);
+        _btClose     = MakeBtn("BtClose",     () => CloseCancel());
+        _btHelp      = MakeBtn("BtHelp",      () => { });
+        _btOk        = MakeBtn("BtOK",        CloseOk);
+        _btCancel    = MakeBtn("BtCancel",    CloseCancel);
+        _btDefault   = MakeBtn("BtDefault",   () => _confirm = Confirm.Default);
+        _btDelete    = MakeBtn("BtDelete",    () => _confirm = Confirm.Delete);
+        _btQuickSlot = MakeBtn("BtQuickSlot", () => OnOpenQuickSlot?.Invoke());
 
-        ResetToDefault();
-        LayoutButtons();
+        LoadDefaultMap();
     }
 
-    // ── Default bindings (HeavenMS GameConstants DEFAULT arrays, GMS v95) ────
-    private void ResetToDefault()
+    // ── Public binding API (consumed by GameStage / FieldStage) ──────────────────
+
+    /// <summary>The binding for a pressed key (right modifiers fold to the left), or None.</summary>
+    public FuncKeyMapped ForKey(Keys key)
     {
-        _bindings.Clear();
-
-        // ── Movement (client-only, not in server packet) ─────────────────────
-        _bindings[Keys.Left]         = KeyAction.MoveLeft;
-        _bindings[Keys.Right]        = KeyAction.MoveRight;
-        _bindings[Keys.Up]           = KeyAction.Jump;   // up arrow also jumps
-
-        // ── Actions (scan-code table from HeavenMS GameConstants.DEFAULT_*) ──
-        // E  → Equipment(0)
-        _bindings[Keys.E]            = KeyAction.Equipment;
-        // I  → Items(1)
-        _bindings[Keys.I]            = KeyAction.Items;
-        // S  → Stats(2)
-        _bindings[Keys.S]            = KeyAction.Stats;
-        // K  → Skills(3)
-        _bindings[Keys.K]            = KeyAction.Skills;
-        // R  → Friends(4)
-        _bindings[Keys.R]            = KeyAction.Friends;
-        // W  → WorldMap(5)
-        _bindings[Keys.W]            = KeyAction.WorldMap;
-        // C  → MapleChat(6)
-        _bindings[Keys.C]            = KeyAction.MapleChat;
-        // M  → MiniMap(7)
-        _bindings[Keys.M]            = KeyAction.MiniMap;
-        // Q  → QuestLog(8)
-        _bindings[Keys.Q]            = KeyAction.QuestLog;
-        // \  → KeyBindings(9)
-        _bindings[Keys.OemPipe]      = KeyAction.KeyBindings;
-        // 1  → Say/Chat(10)
-        _bindings[Keys.D1]           = KeyAction.Say;
-        // H  → Whisper(11)
-        _bindings[Keys.H]            = KeyAction.Whisper;
-        // 2  → PartyChat(12)
-        _bindings[Keys.D2]           = KeyAction.PartyChat;
-        // 3  → FriendsChat(13)
-        _bindings[Keys.D3]           = KeyAction.FriendsChat;
-        // [  → Menu(14)
-        _bindings[Keys.OemOpenBrackets]  = KeyAction.Menu;
-        // ]  → QuickSlots(15)
-        _bindings[Keys.OemCloseBrackets] = KeyAction.QuickSlots;
-        // '  → ToggleChat(16)
-        _bindings[Keys.OemQuotes]    = KeyAction.ToggleChat;
-        // G  → Guild(17)
-        _bindings[Keys.G]            = KeyAction.Guild;
-        // 4  → GuildChat(18)
-        _bindings[Keys.D4]           = KeyAction.GuildChat;
-        // P  → Party(19)
-        _bindings[Keys.P]            = KeyAction.Party;
-        // L  → Notifier(20)
-        _bindings[Keys.L]            = KeyAction.Notifier;
-        // 6  → MapleNews(21)
-        _bindings[Keys.D6]           = KeyAction.MapleNews;
-        // B  → CashShop(22)
-        _bindings[Keys.B]            = KeyAction.CashShop;
-        // `  → AllianceChat(23)
-        _bindings[Keys.OemTilde]     = KeyAction.AllianceChat;
-        // 5  → BuddyChat(24)
-        _bindings[Keys.D5]           = KeyAction.BuddyChat;
-        // O  → ManageLegion(25)
-        _bindings[Keys.O]            = KeyAction.ManageLegion;
-        // F  → Medals(26)
-        _bindings[Keys.F]            = KeyAction.Medals;
-        // ;  → BossParty(27)
-        _bindings[Keys.OemSemicolon] = KeyAction.BossParty;
-        // Z  → PickUp(50)
-        _bindings[Keys.Z]            = KeyAction.PickUp;
-        // X  → Sit(51)
-        _bindings[Keys.X]            = KeyAction.Sit;
-        // CTRL → Attack(52)
-        _bindings[Keys.LeftControl]  = KeyAction.Attack;
-        _bindings[Keys.RightControl] = KeyAction.Attack;
-        // ALT  → Jump(53)
-        _bindings[Keys.LeftAlt]      = KeyAction.Jump;
-        // SPACE → Interact/Harvest(54)
-        _bindings[Keys.Space]        = KeyAction.Interact;
-        // F1-F7 → Face1-7 (100-106)
-        _bindings[Keys.F1]           = KeyAction.Face1;
-        _bindings[Keys.F2]           = KeyAction.Face2;
-        _bindings[Keys.F3]           = KeyAction.Face3;
-        _bindings[Keys.F4]           = KeyAction.Face4;
-        _bindings[Keys.F5]           = KeyAction.Face5;
-        _bindings[Keys.F6]           = KeyAction.Face6;
-        _bindings[Keys.F7]           = KeyAction.Face7;
+        var sc = KeysToScanCode(key);
+        sc = sc switch
+        {
+            KeyConfigLayout.ScRShift => KeyConfigLayout.ScLShift,
+            KeyConfigLayout.ScRCtrl  => KeyConfigLayout.ScLCtrl,
+            KeyConfigLayout.ScRAlt   => KeyConfigLayout.ScLAlt,
+            _ => sc,
+        };
+        return sc >= 0 && sc < MapSize ? _map[sc] : FuncKeyMapped.None;
     }
 
-    // ── Accessors ─────────────────────────────────────────────────────────────
-
-    public KeyAction GetAction(Keys key) =>
-        _bindings.TryGetValue(key, out var a) ? a : KeyAction.None;
-
-    public void SetBinding(Keys key, KeyAction action) => _bindings[key] = action;
-
-    /// <summary>
-    /// Returns true if ANY key bound to <paramref name="action"/> is held.
-    /// Used for continuous actions polled in Update (movement, jump).
-    /// </summary>
+    /// <summary>True if any key for this action (or the client-only arrows) is held.</summary>
     public bool IsActionDown(KeyboardState kb, KeyAction action)
     {
-        foreach (var (k, a) in _bindings)
-            if (a == action && kb.IsKeyDown(k)) return true;
-        return false;
-    }
-
-    public IEnumerable<Keys> KeysFor(KeyAction action) =>
-        _bindings.Where(kv => kv.Value == action).Select(kv => kv.Key);
-
-    /// <summary>
-    /// Apply a full keybinding update from the server keymap packet.
-    /// Called by the Kinoko packet handler once wired.
-    /// type: 0=none 1=skill 2=item 3=cash 4=menu 5=action 6=face 8=macro
-    /// </summary>
-    public void ApplyServerKeymap(IEnumerable<(int keyIndex, int type, int actionId)> entries)
-    {
-        // Remove all server-driven bindings (keep MoveLeft/MoveRight which are client-only)
-        var clientOnly = _bindings
-            .Where(kv => kv.Value == KeyAction.MoveLeft || kv.Value == KeyAction.MoveRight)
-            .ToList();
-        _bindings.Clear();
-        _funcBinds.Clear();
-        foreach (var (k, v) in clientOnly) _bindings[k] = v;
-
-        foreach (var (keyIndex, type, actionId) in entries)
+        switch (action)
         {
-            var key = ScanCodeToKeys(keyIndex);
-            if (key == null || type == 0) continue;
-            switch (type)
-            {
-                case 1: _funcBinds[key.Value] = new FuncBind(FuncBindType.Skill, actionId); break;
-                case 2: _funcBinds[key.Value] = new FuncBind(FuncBindType.Item, actionId); break;
-                case 6: _funcBinds[key.Value] = new FuncBind(FuncBindType.Face, actionId); break;
-                case 8: _funcBinds[key.Value] = new FuncBind(FuncBindType.Macro, actionId); break;
-                default: // 4 = menu, 5 = action → a KeyAction
-                    if (Enum.IsDefined(typeof(KeyAction), actionId))
-                    {
-                        _bindings[key.Value] = (KeyAction)actionId;
-                    }
-                    break;
-            }
+            case KeyAction.MoveLeft:  return kb.IsKeyDown(Keys.Left);
+            case KeyAction.MoveRight: return kb.IsKeyDown(Keys.Right);
+            case KeyAction.Jump:
+                // Up is reserved for ladders/ropes + portals; jump is Left/Right Alt (v95 default) or the bound key.
+                return kb.IsKeyDown(Keys.LeftAlt) || kb.IsKeyDown(Keys.RightAlt)
+                    || AnyHeld(kb, FuncKeyType.BasicAction, (int)KeyAction.Jump);
+            default:
+                if (!TryActionToFuncKey(action, out var fk)) return false;
+                return AnyHeld(kb, fk.Type, fk.Id);
         }
     }
 
-    // ── Update ────────────────────────────────────────────────────────────────
+    private bool AnyHeld(KeyboardState kb, FuncKeyType type, int id)
+    {
+        for (var sc = 0; sc < MapSize; sc++)
+        {
+            if (_map[sc].Type != type || _map[sc].Id != id) continue;
+            var k = ScanCodeToKeys(sc);
+            if (k is { } key && kb.IsKeyDown(key)) return true;
+        }
+        return false;
+    }
 
-    private string? _warning;
-    private float _warningTimer;
-    private void SetWarning(string msg) { _warning = msg; _warningTimer = 3f; }
+    /// <summary>Snapshot the 89-slot map (for disk persistence).</summary>
+    public FuncKeyMapped[] ExportMap() => (FuncKeyMapped[])_map.Clone();
+
+    /// <summary>Replace the live map (from disk). A null/short array keeps defaults.</summary>
+    public void ImportMap(IReadOnlyList<FuncKeyMapped>? map)
+    {
+        if (map is null || map.Count == 0) return;
+        for (var i = 0; i < MapSize; i++)
+            _map[i] = i < map.Count ? map[i] : FuncKeyMapped.None;
+    }
+
+    /// <summary>
+    /// Apply the full server keymap (<c>FuncKeyMappedInit</c>). Entries are
+    /// (scancode, type, id); the array is rebuilt from scratch.
+    /// </summary>
+    public void ApplyServerKeymap(IEnumerable<(int keyIndex, int type, int actionId)> entries)
+    {
+        Array.Clear(_map);
+        foreach (var (keyIndex, type, actionId) in entries)
+        {
+            if (keyIndex < 0 || keyIndex >= MapSize) continue;
+            if (!Enum.IsDefined(typeof(FuncKeyType), (byte)type)) continue;
+            _map[keyIndex] = new FuncKeyMapped((FuncKeyType)type, actionId);
+        }
+        SnapshotOpen();
+    }
+
+    // ── Default map (Kinoko GameConstants.defaultFuncKeyMap, GMS v95) ─────────────
+    private static readonly int[] DefIndex =
+        { 2, 3, 4, 5, 6, 7, 8, 16, 17, 18, 19, 20, 23, 24, 25, 26, 27, 29, 31, 33, 34, 35, 37, 38, 39, 40, 41, 43, 44, 45, 46, 50, 56, 57, 59, 60, 61, 62, 63, 64, 65 };
+    private static readonly int[] DefType =
+        { 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 5, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 5, 5, 4, 4, 5, 5, 6, 6, 6, 6, 6, 6, 6 };
+    private static readonly int[] DefId =
+        { 10, 12, 13, 18, 24, 21, 29, 8, 5, 0, 4, 28, 1, 25, 19, 14, 15, 52, 2, 26, 17, 11, 3, 20, 27, 16, 23, 9, 50, 51, 6, 7, 53, 54, 100, 101, 102, 103, 104, 105, 106 };
+
+    private void LoadDefaultMap()
+    {
+        Array.Clear(_map);
+        for (var i = 0; i < DefIndex.Length; i++)
+            _map[DefIndex[i]] = new FuncKeyMapped((FuncKeyType)DefType[i], DefId[i]);
+        SnapshotOpen();
+    }
+
+    // ── Window lifecycle ────────────────────────────────────────────────────────
+
+    public void Open()
+    {
+        IsVisible = true;
+        SnapshotOpen();
+        CancelDrag();
+        _confirm = Confirm.None;
+    }
+
+    private void SnapshotOpen() => Array.Copy(_map, _mapOnOpen, MapSize);
+
+    private void CloseOk()
+    {
+        // Save the diff to the server, persist the full map to disk, then close.
+        var changed = new List<(int index, FuncKeyMapped fk)>();
+        for (var i = 0; i < MapSize; i++)
+            if (_map[i] != _mapOnOpen[i])
+                changed.Add((i, _map[i]));
+        if (changed.Count > 0) OnSaveToServer?.Invoke(changed);
+        OnBindingsChanged?.Invoke();
+        SnapshotOpen();
+        CloseInternal();
+    }
+
+    private void CloseCancel()
+    {
+        Array.Copy(_mapOnOpen, _map, MapSize);  // revert
+        CloseInternal();
+    }
+
+    private void CloseInternal()
+    {
+        IsVisible = false;
+        CancelDrag();
+        _confirm = Confirm.None;
+    }
+
+    private void CancelDrag()
+    {
+        _dragActive = false;
+        _dragFromScancode = -1;
+        _windowDrag = false;
+    }
+
+    // ── Update (drag tracking) ───────────────────────────────────────────────────
 
     public override void Update(GameTime gt)
     {
         LayoutButtons();
-        if (_warningTimer > 0)
+        if (!IsVisible) return;
+
+        var m = Mouse.GetState();
+        _dragMouse = new Point(m.X, m.Y);
+
+        // Window move is HOLD-to-drag: follow the cursor while the button is held, drop on release.
+        if (_windowDrag)
         {
-            _warningTimer -= (float)gt.ElapsedGameTime.TotalSeconds;
-            if (_warningTimer <= 0) _warning = null;
+            if (m.LeftButton == ButtonState.Pressed)
+                Position = new Vector2(m.X, m.Y) - _windowDragOff;
+            else
+                _windowDrag = false;
         }
     }
 
-    // ── Draw ──────────────────────────────────────────────────────────────────
+    private void FinishDrag(int sx, int sy)
+    {
+        var lx = sx - (int)Position.X;
+        var ly = sy - (int)Position.Y;
+        var sc = KeyConfigLayout.HitTestKey(lx, ly);
+        if (sc >= 0)
+        {
+            // A skill/item/macro lives on exactly one key — clear any prior holder.
+            if (_dragIcon.Type is FuncKeyType.Skill or FuncKeyType.Item or FuncKeyType.Effect or FuncKeyType.MacroSkill)
+                for (var i = 0; i < MapSize; i++)
+                    if (_map[i] == _dragIcon) _map[i] = FuncKeyMapped.None;
+            _map[sc] = _dragIcon;
+        }
+        // Dropped on the palette or outside → stays unbound (already cleared on pickup).
+        CancelDrag();
+    }
+
+    // ── Draw ──────────────────────────────────────────────────────────────────────
 
     public override void Draw(SpriteBatch sb, Texture2D white)
     {
         if (!IsVisible) return;
-
+        _white = white;
         var px = (int)Position.X;
         var py = (int)Position.Y;
 
-        if (_background != null)
-            _background.Draw(sb, Position + new Vector2(PanelW / 2f, PanelH / 2f));
+        if (_bg != null)
+        {
+            // Base frame: top-left at Position (cancel its own origin). The inner panel + keyboard
+            // layers position themselves via their negative origins (insets) relative to Position.
+            _bg.Draw(sb, Position + _bg.Origin);
+            _bg2?.Draw(sb, Position);
+            _bg3?.Draw(sb, Position);
+        }
         else
         {
-            sb.Draw(white, new Rectangle(px, py, PanelW, PanelH), new Color(12, 12, 22, 240));
-            DrawBorder(sb, white, new Rectangle(px, py, PanelW, PanelH), new Color(60, 60, 80));
+            sb.Draw(white, new Rectangle(px, py, _panelW, _panelH), new Color(12, 12, 22, 240));
+            _font?.Draw(sb, "Key Configuration", new Vector2(px + 230, py + 6), new Color(220, 200, 150));
         }
 
-        _font?.Draw(sb, "Key Configuration", new Vector2(px + 200, py + 6),
-            new Color(220, 200, 150));
-
-        if (_rebindTarget.HasValue)
-        {
-            var msg = $"Press a key to bind to: {SlotLabel(_rebindTarget.Value)}  (ESC = cancel)";
-            if (_font != null)
-            {
-                var sz = _font.Measure(msg);
-                _font.Draw(sb, msg,
-                    new Vector2(px + (PanelW - (int)sz.X) / 2, py + PanelH - 18),
-                    new Color(255, 220, 60));
-            }
-        }
-        else if (_warning != null && _font != null)
-        {
-            var sz = _font.Measure(_warning);
-            _font.Draw(sb, _warning,
-                new Vector2(px + (PanelW - (int)sz.X) / 2, py + PanelH - 18),
-                new Color(255, 140, 90));
-        }
-
-        DrawKeyGrid(sb, white, px, py);
+        DrawKeyIcons(sb);
+        DrawPalette(sb, white);
         foreach (var b in _allButtons) b.Draw(sb);
+
+        // Drag ghost
+        if (_dragActive)
+        {
+            var icon = IconFor(_dragIcon);
+            if (icon != null)
+                icon.Draw(sb, new Vector2(_dragMouse.X, _dragMouse.Y) + icon.Origin - new Vector2(16, 16));
+            else
+                DrawPlaceholder(sb, white, _dragMouse.X - 16, _dragMouse.Y - 16, _dragIcon);
+        }
+
+        if (_confirm != Confirm.None) DrawConfirm(sb, white, px, py);
     }
 
-    private void DrawKeyGrid(SpriteBatch sb, Texture2D white, int px, int py)
+    private void DrawKeyIcons(SpriteBatch sb)
     {
-        var rowY = py + GridY;
-        foreach (var row in KeyRows)
+        foreach (var sc in KeyConfigLayout.BindableScancodes)
         {
-            var slotX = px + GridX;
-            foreach (var (key, keyLabel) in row)
+            // Right modifiers mirror their left counterpart's binding.
+            var bindSc = sc switch
             {
-                var w = keyLabel.Length > 2 ? SlotW + 10 : SlotW;
-                DrawKeySlot(sb, white, slotX, rowY, w, key, keyLabel);
-                slotX += w + SlotGap;
-            }
-            rowY += SlotH + SlotGap;
+                KeyConfigLayout.ScRShift => KeyConfigLayout.ScLShift,
+                KeyConfigLayout.ScRCtrl  => KeyConfigLayout.ScLCtrl,
+                KeyConfigLayout.ScRAlt   => KeyConfigLayout.ScLAlt,
+                _ => sc,
+            };
+            if (bindSc < 0 || bindSc >= MapSize) continue;
+            var fk = _map[bindSc];
+            if (!fk.IsBound) continue;
+            if (!KeyConfigLayout.TryGetCell(sc, out var cell)) continue;
+            DrawIconAt(sb, cell, fk);
         }
     }
 
-    private void DrawKeySlot(SpriteBatch sb, Texture2D white,
-        int x, int y, int w, Keys key, string keyLabel)
+    private void DrawPalette(SpriteBatch sb, Texture2D white)
     {
-        var isTarget = _rebindTarget == key;
-        _bindings.TryGetValue(key, out var action);
-        var func     = GetFuncBind(key);
-        var hasBind  = (action != KeyAction.None && action != default) || func is not null;
-
-        Color fill   = isTarget ? new Color(80, 60, 20)
-                     : hasBind  ? new Color(30, 40, 55)
-                     : new Color(22, 22, 32);
-        Color border = isTarget ? new Color(240, 180, 40)
-                     : hasBind  ? new Color(60, 90, 130)
-                     : new Color(55, 55, 75);
-
-        sb.Draw(white, new Rectangle(x, y, w, SlotH), fill);
-        DrawBorder(sb, white, new Rectangle(x, y, w, SlotH), border);
-
-        // Key name (top-left, dim)
-        _font?.Draw(sb, keyLabel, new Vector2(x + 2, y + 1), new Color(130, 135, 170));
-
-        // Bound label (bottom): a function bind (skill/item/face/macro) or a KeyAction.
-        if (func is { } fb)
-            _font?.Draw(sb, FuncLabel(fb), new Vector2(x + 2, y + 13), new Color(230, 200, 150));
-        else if (action != KeyAction.None && ActionLabel.TryGetValue(action, out var al))
-            _font?.Draw(sb, al, new Vector2(x + 2, y + 13), new Color(200, 220, 200));
+        for (var slot = 0; slot < KeyConfigLayout.PaletteCount; slot++)
+        {
+            var fk = KeyConfigLayout.PaletteBinding(slot);
+            // Skip the Monster Book slot — v95 dropped the feature (no UIWindow2 icon for it).
+            if (fk.Type == FuncKeyType.Menu && fk.Id == MonsterBookMenuId) continue;
+            // Hide a palette icon once it's been placed on a key (matches bMapped).
+            if (IsPlaced(fk)) continue;
+            // While carrying an icon, hide it from its palette home slot so grabbing one off a key
+            // doesn't make it flash into the unused area — it lives only on the cursor until dropped.
+            if (_dragActive && fk == _dragIcon) continue;
+            var cell = KeyConfigLayout.PaletteCell(slot);
+            DrawIconAt(sb, cell, fk);
+        }
     }
 
-    private static string FuncLabel(FuncBind fb) => fb.Type switch
+    private bool IsPlaced(FuncKeyMapped fk)
     {
-        FuncBindType.Skill => "SKL",
-        FuncBindType.Item  => "ITM",
-        FuncBindType.Face  => "FACE",
-        FuncBindType.Macro => "MAC",
-        _ => "?",
-    };
+        for (var i = 0; i < MapSize; i++)
+            if (_map[i] == fk) return true;
+        return false;
+    }
 
-    // ── Input ─────────────────────────────────────────────────────────────────
+    private void DrawIconAt(SpriteBatch sb, Point cell, FuncKeyMapped fk)
+    {
+        // Uniform anchor: top-left at Position+cell, regardless of icon origin
+        // (CalcKeyIconPosInfo: top-left = pos - origin + (0,32)).
+        var anchor = Position + new Vector2(cell.X, cell.Y + 32);
+        var icon = IconFor(fk);
+        if (icon != null) icon.Draw(sb, anchor);
+        else DrawPlaceholder(sb, _white, cell.X, cell.Y, fk);
+    }
+
+    // Skill/item/macro icons need their own WZ providers (not wired here yet); show
+    // a small typed placeholder so server-sent bindings are still visible/draggable.
+    private Texture2D _white = null!;
+    private void DrawPlaceholder(SpriteBatch sb, Texture2D white, int x, int y, FuncKeyMapped fk)
+    {
+        if (white == null) return;
+        var pos = new Rectangle((int)Position.X + x, (int)Position.Y + y, 32, 32);
+        var c = fk.Type switch
+        {
+            FuncKeyType.Skill => new Color(60, 90, 150),
+            FuncKeyType.Item or FuncKeyType.Effect => new Color(110, 90, 50),
+            FuncKeyType.MacroSkill => new Color(90, 60, 110),
+            _ => new Color(70, 70, 80),
+        };
+        sb.Draw(white, pos, c);
+        _font?.Draw(sb, fk.Type switch
+        {
+            FuncKeyType.Skill => "SK", FuncKeyType.Item or FuncKeyType.Effect => "IT",
+            FuncKeyType.MacroSkill => "MA", _ => "?",
+        }, new Vector2(pos.X + 8, pos.Y + 10), Color.White);
+    }
+
+    private WzSprite? IconFor(FuncKeyMapped fk)
+    {
+        if (fk.Type is FuncKeyType.Menu or FuncKeyType.BasicAction or FuncKeyType.BasicMotion or FuncKeyType.Emotion)
+            return LoadIcon(fk.Id);
+        return null; // skill/item/macro icons: provider not wired here yet
+    }
+
+    private WzSprite? LoadIcon(int id)
+    {
+        if (_iconCache.TryGetValue(id, out var s)) return s;
+        WzSprite? sprite = _iconRoot?.Get(id.ToString()) is WzCanvas canvas ? _loader.Load(canvas) : null;
+        _iconCache[id] = sprite;
+        return sprite;
+    }
+
+    // ── Mouse input ─────────────────────────────────────────────────────────────
 
     public override bool HandleMouseButton(int x, int y, bool down)
     {
         if (!IsVisible) return false;
+        var inside = new Rectangle((int)Position.X, (int)Position.Y, _panelW, _panelH).Contains(x, y);
 
-        foreach (var b in _allButtons)
-            if (b.HandleMouseButton(x, y, down)) return true;
-
-        if (!down) return false;
-
-        var px = (int)Position.X;
-        var py = (int)Position.Y;
-        var rowY = py + GridY;
-        foreach (var row in KeyRows)
+        // Confirm overlay is modal while shown.
+        if (_confirm != Confirm.None)
         {
-            var slotX = px + GridX;
-            foreach (var (key, keyLabel) in row)
-            {
-                var w = keyLabel.Length > 2 ? SlotW + 10 : SlotW;
-                if (new Rectangle(slotX, rowY, w, SlotH).Contains(x, y))
-                {
-                    _rebindTarget = key;
-                    return true;
-                }
-                slotX += w + SlotGap;
-            }
-            rowY += SlotH + SlotGap;
+            if (down) HandleConfirmClick(x, y);
+            return true;
         }
 
-        return new Rectangle(px, py, PanelW, PanelH).Contains(x, y);
+        if (!down)
+        {
+            // Releases only complete a button click; sticky drags drop on the next press.
+            foreach (var b in _allButtons) if (b.HandleMouseButton(x, y, false)) return true;
+            return inside;
+        }
+
+        // Sticky icon drag: a press while carrying an icon drops it (on a key, the palette, or
+        // outside → unbind). Takes precedence over everything else. (Window move is separate —
+        // it's hold-to-drag, started below and released on mouse-up in Update.)
+        if (_dragActive) { FinishDrag(x, y); return true; }
+
+        // Down: buttons first.
+        foreach (var b in _allButtons) if (b.HandleMouseButton(x, y, true)) return true;
+        if (!inside) return false;
+
+        var lx = x - (int)Position.X;
+        var ly = y - (int)Position.Y;
+
+        // Pick an icon off a key.
+        var sc = KeyConfigLayout.HitTestKey(lx, ly);
+        if (sc >= 0 && _map[sc].IsBound)
+        {
+            _dragIcon = _map[sc];
+            _dragFromScancode = sc;
+            _map[sc] = FuncKeyMapped.None;
+            _dragActive = true;
+            return true;
+        }
+
+        // Pick an icon out of the palette.
+        var slot = KeyConfigLayout.HitTestPalette(lx, ly);
+        if (slot >= 0)
+        {
+            var fk = KeyConfigLayout.PaletteBinding(slot);
+            // Only grab when the slot's icon is actually shown: skip the (empty) Monster Book slot
+            // and any action already placed on a key (its palette cell is visually empty — grabbing
+            // it would fabricate a duplicate). Mirrors DrawPalette's skip logic.
+            if ((fk.Type == FuncKeyType.Menu && fk.Id == MonsterBookMenuId) || IsPlaced(fk))
+                return true;
+            _dragIcon = fk;
+            _dragFromScancode = -1;
+            _dragActive = true;
+            return true;
+        }
+
+        // Otherwise: drag the window from empty chrome (top strip).
+        if (ly < 24)
+        {
+            _windowDrag = true;
+            _windowDragOff = new Vector2(x - Position.X, y - Position.Y);
+        }
+        return true;
     }
 
     public override bool OnKeyPress(Keys key)
     {
         if (!IsVisible) return false;
-
-        if (_rebindTarget.HasValue)
+        if (_confirm != Confirm.None)
         {
-            if (key == Keys.Escape) { _rebindTarget = null; return true; }
-
-            var src = _rebindTarget.Value;
-            // Warn if the destination key already held a different binding.
-            if (key != src && (_bindings.ContainsKey(key) || _funcBinds.ContainsKey(key)))
-            {
-                SetWarning($"{SlotLabel(key)} was already bound — overwritten.");
-            }
-
-            // Move whatever the source slot held (KeyAction or FuncBind) onto the key.
-            var hadAction = _bindings.TryGetValue(src, out var oldAction);
-            var hadFunc = _funcBinds.TryGetValue(src, out var oldFunc);
-            _bindings.Remove(key);
-            _funcBinds.Remove(key);
-            if (hadAction) _bindings[key] = oldAction;
-            else if (hadFunc) _funcBinds[key] = oldFunc;
-            _bindings.Remove(src);
-            _funcBinds.Remove(src);
-            _rebindTarget = key;
+            if (key == Keys.Escape) { _confirm = Confirm.None; return true; }
+            if (key == Keys.Enter) { ApplyConfirm(); return true; }
             return true;
         }
-
-        if (key == Keys.Escape) { CloseConfig(); return true; }
-        return false;
+        if (key == Keys.Escape) { CloseCancel(); return true; }
+        return false;  // let bound keys still dispatch while the window is open
     }
 
-    // ── Helpers ───────────────────────────────────────────────────────────────
+    // ── Confirm overlay ──────────────────────────────────────────────────────────
 
-    private string SlotLabel(Keys k)
+    private void HandleConfirmClick(int x, int y)
     {
-        foreach (var row in KeyRows)
-            foreach (var (key, label) in row)
-                if (key == k) return label;
-        return k.ToString();
+        var (yes, no) = ConfirmButtons();
+        if (yes.Contains(x, y)) ApplyConfirm();
+        else if (no.Contains(x, y)) _confirm = Confirm.None;
     }
 
+    private void ApplyConfirm()
+    {
+        if (_confirm == Confirm.Default) LoadDefaultMap();
+        else if (_confirm == Confirm.Delete) Array.Clear(_map);
+        OnBindingsChanged?.Invoke();
+        _confirm = Confirm.None;
+    }
+
+    private (Rectangle yes, Rectangle no) ConfirmButtons()
+    {
+        var cx = (int)Position.X + _panelW / 2;
+        var cy = (int)Position.Y + _panelH / 2;
+        return (new Rectangle(cx - 90, cy + 12, 70, 24), new Rectangle(cx + 20, cy + 12, 70, 24));
+    }
+
+    private void DrawConfirm(SpriteBatch sb, Texture2D white, int px, int py)
+    {
+        _white = white;
+        var box = new Rectangle(px + _panelW / 2 - 140, py + _panelH / 2 - 40, 280, 90);
+        sb.Draw(white, new Rectangle(px, py, _panelW, _panelH), new Color(0, 0, 0, 120));
+        sb.Draw(white, box, new Color(20, 22, 34, 250));
+        DrawBorder(sb, white, box, new Color(90, 100, 140));
+        var msg = _confirm == Confirm.Default
+            ? "Restore the default key layout?"
+            : "Clear all key bindings?";
+        if (_font != null)
+        {
+            var sz = _font.Measure(msg);
+            _font.Draw(sb, msg, new Vector2(px + (_panelW - (int)sz.X) / 2, box.Y + 16), new Color(230, 220, 200));
+        }
+        var (yes, no) = ConfirmButtons();
+        DrawTextButton(sb, white, yes, "OK");
+        DrawTextButton(sb, white, no, "Cancel");
+    }
+
+    private void DrawTextButton(SpriteBatch sb, Texture2D white, Rectangle r, string label)
+    {
+        var hover = r.Contains(_dragMouse);
+        sb.Draw(white, r, hover ? new Color(90, 110, 160) : new Color(60, 70, 110));
+        DrawBorder(sb, white, r, new Color(120, 130, 170));
+        if (_font != null)
+        {
+            var sz = _font.Measure(label);
+            _font.Draw(sb, label, new Vector2(r.X + (r.Width - sz.X) / 2, r.Y + (r.Height - _font.LineHeight) / 2), Color.White);
+        }
+    }
+
+    // ── Button layout ────────────────────────────────────────────────────────────
+    // Bottom band of the lower panel (between the keyboard and the 3-row palette).
+    // NOTE: button x/y are best-effort pending an exact CUIKeyConfig read; the
+    // window-frame Close/Help sit top-right.
     private void LayoutButtons()
     {
-        if (_btClose   != null) _btClose.Position   = Position + new Vector2(PanelW - 20, 4);
-        if (_btDefault != null) _btDefault.Position = Position + new Vector2(PanelW - 150, PanelH - 22);
-        if (_btOk      != null) _btOk.Position      = Position + new Vector2(PanelW - 60,  PanelH - 22);
+        Place(_btClose, _panelW - 18, 6);
+        Place(_btHelp, _panelW - 34, 6);
+        Place(_btQuickSlot, 14, 240);
+        Place(_btDefault, 120, 240);
+        Place(_btDelete, 186, 240);
+        Place(_btOk, _panelW - 112, 240);
+        Place(_btCancel, _panelW - 60, 240);
     }
 
-    private Button? MakeBtn(WzTextureLoader loader, WzProperty? root, string name, Action onClick)
+    private void Place(Button? b, int x, int y)
     {
-        var pr = root?.Get(name) as WzProperty;
-        if (pr is null) return null;
-        var b = new Button(loader, pr) { OnClick = onClick };
+        if (b != null) b.Position = Position + new Vector2(x, y);
+    }
+
+    private Button? MakeBtn(string name, Action onClick)
+    {
+        if (_kc?.Get(name) is not WzProperty pr) return null;
+        var b = new Button(_loader, pr) { OnClick = onClick };
         _allButtons.Add(b);
         return b;
     }
 
-    // Map HeavenMS scan-code indices (from DEFAULT_KEY array) to MonoGame Keys
+    // ── Scancode ⇄ Keys ──────────────────────────────────────────────────────────
+
+    private static readonly Dictionary<Keys, int> KeysToSc = BuildKeysToSc();
+
+    private static int KeysToScanCode(Keys k) => KeysToSc.TryGetValue(k, out var sc) ? sc : -1;
+
     private static Keys? ScanCodeToKeys(int sc) => sc switch
     {
-        2  => Keys.D1,      3  => Keys.D2,      4  => Keys.D3,      5  => Keys.D4,
-        6  => Keys.D5,      7  => Keys.D6,       8  => Keys.D7,      9  => Keys.D8,
-        10 => Keys.D9,      11 => Keys.D0,
-        12 => Keys.OemMinus, 13 => Keys.OemPlus,
-        16 => Keys.Q,       17 => Keys.W,        18 => Keys.E,       19 => Keys.R,
-        20 => Keys.T,       21 => Keys.Y,        22 => Keys.U,       23 => Keys.I,
-        24 => Keys.O,       25 => Keys.P,
+        2 => Keys.D1, 3 => Keys.D2, 4 => Keys.D3, 5 => Keys.D4, 6 => Keys.D5,
+        7 => Keys.D6, 8 => Keys.D7, 9 => Keys.D8, 10 => Keys.D9, 11 => Keys.D0,
+        12 => Keys.OemMinus, 13 => Keys.OemPlus, 14 => Keys.Back,
+        16 => Keys.Q, 17 => Keys.W, 18 => Keys.E, 19 => Keys.R, 20 => Keys.T,
+        21 => Keys.Y, 22 => Keys.U, 23 => Keys.I, 24 => Keys.O, 25 => Keys.P,
         26 => Keys.OemOpenBrackets, 27 => Keys.OemCloseBrackets,
-        29 => Keys.LeftControl,
-        30 => Keys.A,       31 => Keys.S,        32 => Keys.D,       33 => Keys.F,
-        34 => Keys.G,       35 => Keys.H,        36 => Keys.J,       37 => Keys.K,
-        38 => Keys.L,
-        39 => Keys.OemSemicolon,
-        40 => Keys.OemQuotes,
-        41 => Keys.OemTilde,
-        42 => Keys.LeftShift,
-        43 => Keys.OemPipe,
-        44 => Keys.Z,       45 => Keys.X,        46 => Keys.C,       47 => Keys.V,
-        48 => Keys.B,       49 => Keys.N,        50 => Keys.M,
-        51 => Keys.OemComma, 52 => Keys.OemPeriod,
-        56 => Keys.LeftAlt, 57 => Keys.Space,
-        59 => Keys.F1,      60 => Keys.F2,       61 => Keys.F3,      62 => Keys.F4,
-        63 => Keys.F5,      64 => Keys.F6,       65 => Keys.F7,      66 => Keys.F8,
-        67 => Keys.F9,      68 => Keys.F10,      69 => Keys.F11,     70 => Keys.F12,
-        71 => Keys.Home,    73 => Keys.PageUp,    79 => Keys.End,     81 => Keys.PageDown,
-        82 => Keys.Insert,  83 => Keys.Delete,   84 => Keys.Escape,
-        85 => Keys.RightControl, 86 => Keys.RightShift, 87 => Keys.RightAlt,
-        88 => Keys.Scroll,
+        28 => Keys.Enter, 29 => Keys.LeftControl,
+        30 => Keys.A, 31 => Keys.S, 32 => Keys.D, 33 => Keys.F, 34 => Keys.G,
+        35 => Keys.H, 36 => Keys.J, 37 => Keys.K, 38 => Keys.L,
+        39 => Keys.OemSemicolon, 40 => Keys.OemQuotes, 41 => Keys.OemTilde,
+        42 => Keys.LeftShift, 43 => Keys.OemPipe,
+        44 => Keys.Z, 45 => Keys.X, 46 => Keys.C, 47 => Keys.V, 48 => Keys.B,
+        49 => Keys.N, 50 => Keys.M, 51 => Keys.OemComma, 52 => Keys.OemPeriod,
+        53 => Keys.OemQuestion, 54 => Keys.RightShift,
+        56 => Keys.LeftAlt, 57 => Keys.Space, 58 => Keys.CapsLock,
+        59 => Keys.F1, 60 => Keys.F2, 61 => Keys.F3, 62 => Keys.F4, 63 => Keys.F5,
+        64 => Keys.F6, 65 => Keys.F7, 66 => Keys.F8, 67 => Keys.F9, 68 => Keys.F10,
+        71 => Keys.Home, 73 => Keys.PageUp, 79 => Keys.End, 81 => Keys.PageDown,
+        82 => Keys.Insert, 83 => Keys.Delete,
+        87 => Keys.F11, 88 => Keys.F12,
         _ => null,
     };
+
+    private static Dictionary<Keys, int> BuildKeysToSc()
+    {
+        var d = new Dictionary<Keys, int>();
+        for (var sc = 0; sc < 145; sc++)
+            if (ScanCodeToKeys(sc) is { } k) d[k] = sc;
+        d[Keys.RightControl] = KeyConfigLayout.ScRCtrl;
+        d[Keys.RightAlt] = KeyConfigLayout.ScRAlt;
+        return d;
+    }
+
+    // ── KeyAction ⇄ FuncKeyMapped (dispatch glue) ───────────────────────────────
+
+    private static bool TryActionToFuncKey(KeyAction action, out FuncKeyMapped fk)
+    {
+        var id = (int)action;
+        if (id is >= 0 and < 30) { fk = new FuncKeyMapped(FuncKeyType.Menu, id); return true; }
+        if (id is >= 50 and <= 54) { fk = new FuncKeyMapped(FuncKeyType.BasicAction, id); return true; }
+        fk = FuncKeyMapped.None;
+        return false;
+    }
 
     private static void DrawBorder(SpriteBatch sb, Texture2D white, Rectangle r, Color c)
     {
