@@ -71,16 +71,25 @@ public sealed class EquipInventory : GamePanel
     private readonly List<Button> _allButtons = new();
     private readonly ItemIconLoader _icons;
     private readonly BuiltInFont? _font;
+    private readonly ItemTooltip? _tooltip;
+    private int _viewW = 800, _viewH = 600;
 
     // ── State ────────────────────────────────────────────────────────────────
     private int  _tooltipPart = -1;
     private bool _dragging;
     private Vector2 _dragOff;
+    private int    _lastClickPart = -1;
+    private double _lastClickTime;
+
+    /// <summary>Raised on a double-click of a worn slot — the body part to unequip
+    /// (CUIEquip::OnMouseButton → CDraggableItem::GetOffEquipItem).</summary>
+    public Action<int>? OnUnequip { get; set; }
 
     public EquipInventory(WzTextureLoader loader, WzPackage? ui, BuiltInFont? font, ItemIconLoader icons)
     {
         _font  = font;
         _icons = icons;
+        if (font != null) _tooltip = new ItemTooltip(font, icons);
         IsVisible = false;
         Position  = new Vector2(560, 60);
 
@@ -220,10 +229,20 @@ public sealed class EquipInventory : GamePanel
 
         foreach (var b in _allButtons) b.Draw(sb);
 
-        if (_tooltipPart >= 0 && _font != null && _equipped.TryGetValue(_tooltipPart, out var hov))
+        if (_tooltipPart >= 0 && _equipped.TryGetValue(_tooltipPart, out var hov))
         {
-            DrawTooltip(sb, white, hov.Name);
+            var m = Mouse.GetState();
+            if (_tooltip != null)
+                _tooltip.Draw(sb, white, hov.ItemId, hov.Name, 0, 1, m.X, m.Y, _viewW, _viewH);
+            else if (_font != null)
+                DrawTooltip(sb, white, hov.Name);
         }
+    }
+
+    public override void Relayout(int viewWidth, int viewHeight)
+    {
+        _viewW = viewWidth;
+        _viewH = viewHeight;
     }
 
     private void DrawTooltip(SpriteBatch sb, Texture2D white, string text)
@@ -268,6 +287,23 @@ public sealed class EquipInventory : GamePanel
         if (!IsVisible) return false;
         foreach (var b in _allButtons)
             if (b.HandleMouseButton(x, y, down)) return true;
+
+        // Double-click a worn slot → unequip it (the item moves to the first free Equip-inventory slot).
+        if (down)
+        {
+            foreach (var (part, _) in _equipped)
+            {
+                if (!CellRect(part).Contains(x, y)) continue;
+                var now = Environment.TickCount64 / 1000.0;
+                if (part == _lastClickPart && now - _lastClickTime < 0.4)
+                {
+                    OnUnequip?.Invoke(part);
+                    _lastClickPart = -1;
+                }
+                else { _lastClickPart = part; _lastClickTime = now; }
+                return true;
+            }
+        }
 
         var titleBar = new Rectangle((int)Position.X, (int)Position.Y, PanelW, TitleH);
         if (down && titleBar.Contains(x, y))

@@ -51,6 +51,18 @@ public sealed class PlayerController
     public int     Frame      { get; private set; }
     public bool    FacingLeft { get; private set; }
 
+    /// <summary>True while standing on a foothold (not airborne / climbing). Used to
+    /// root a grounded melee swing so the avatar doesn't slide while attacking.</summary>
+    public bool    Grounded   => _grounded;
+
+    /// <summary>Zero horizontal velocity (grounded only) so a melee swing stops the walk
+    /// instantly instead of decelerating into a visible slide. No-op airborne / climbing
+    /// to keep jump-attack drift and ladder movement intact.</summary>
+    public void StopWalking()
+    {
+        if (_grounded && _climb is null) _velocity = new Vector2(0f, _velocity.Y);
+    }
+
     /// <summary>True while attached to a ladder/rope AND actively climbing (Up or Down
     /// held). Drives the climb-frame freeze in <see cref="CharLook"/> so the pose holds
     /// when you stop.</summary>

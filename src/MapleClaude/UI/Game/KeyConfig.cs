@@ -194,8 +194,19 @@ public sealed class KeyConfig : GamePanel
         for (var sc = 0; sc < MapSize; sc++)
         {
             if (_map[sc].Type != type || _map[sc].Id != id) continue;
-            var k = ScanCodeToKeys(sc);
-            if (k is { } key && kb.IsKeyDown(key)) return true;
+            if (ScanCodeToKeys(sc) is { } key && kb.IsKeyDown(key)) return true;
+            // The map only ever stores the LEFT modifier scancode (right mods fold to
+            // left at bind/lookup, per CUIKeyConfig::GetShortCutIndexByPos). So a binding
+            // on L-Ctrl/Shift/Alt must also fire when the matching RIGHT key is held —
+            // e.g. Attack on L-Ctrl works from R-Ctrl too.
+            var sibling = sc switch
+            {
+                KeyConfigLayout.ScLCtrl  => (Keys?)Keys.RightControl,
+                KeyConfigLayout.ScLShift => Keys.RightShift,
+                KeyConfigLayout.ScLAlt   => Keys.RightAlt,
+                _ => null,
+            };
+            if (sibling is { } rk && kb.IsKeyDown(rk)) return true;
         }
         return false;
     }

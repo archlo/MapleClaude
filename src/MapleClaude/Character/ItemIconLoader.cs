@@ -25,6 +25,7 @@ public sealed class ItemIconLoader
     private readonly WzPackage? _characterWz;
     private readonly WzPackage? _itemWz;
     private readonly Dictionary<int, WzSprite?> _cache = new();
+    private readonly Dictionary<int, ItemAttr?> _attrCache = new();
 
     public ItemIconLoader(WzTextureLoader loader, WzPackage? characterWz, WzPackage? itemWz = null)
     {
@@ -55,6 +56,70 @@ public sealed class ItemIconLoader
         _cache[itemId] = sprite; // cache misses too, so we don't re-walk every frame
         return sprite;
     }
+
+    /// <summary>Parsed item attributes for the tooltip (requirements + bonuses), read from the
+    /// item's <c>info</c> node. Equips → Character.wz; consumables/etc → Item.wz. Returns null when
+    /// the item has no info node (caller shows just the name). Cached per id (misses too).</summary>
+    public ItemAttr? LoadAttr(int itemId)
+    {
+        if (_attrCache.TryGetValue(itemId, out var cached)) return cached;
+        ItemAttr? attr = null;
+        try
+        {
+            if (InfoNode(itemId) is { } info)
+            {
+                var isEquip = itemId / 1_000_000 == 1;
+                attr = new ItemAttr
+                {
+                    IsEquip   = isEquip,
+                    Category  = itemId / 10000,
+                    ReqLevel  = I(info, "reqLevel"),
+                    ReqStr    = I(info, "reqSTR"),
+                    ReqDex    = I(info, "reqDEX"),
+                    ReqInt    = I(info, "reqINT"),
+                    ReqLuk    = I(info, "reqLUK"),
+                    ReqFame   = I(info, "reqPOP"),
+                    ReqJob    = I(info, "reqJob"),
+                    IncStr    = I(info, "incSTR"),  IncDex = I(info, "incDEX"),
+                    IncInt    = I(info, "incINT"),  IncLuk = I(info, "incLUK"),
+                    IncPad    = I(info, "incPAD"),  IncMad = I(info, "incMAD"),
+                    IncPdd    = I(info, "incPDD"),  IncMdd = I(info, "incMDD"),
+                    IncMhp    = I(info, "incMHP"),  IncMmp = I(info, "incMMP"),
+                    IncAcc    = I(info, "incACC"),  IncEva = I(info, "incEVA"),
+                    IncSpeed  = I(info, "incSpeed"), IncJump = I(info, "incJump"),
+                    AttackSpeed = I(info, "attackSpeed"),
+                    Upgrades  = I(info, "tuc"),
+                    Cash      = I(info, "cash") != 0,
+                    Only      = I(info, "only") != 0,
+                };
+            }
+        }
+        catch { attr = null; }
+        _attrCache[itemId] = attr;
+        return attr;
+    }
+
+    private WzProperty? InfoNode(int itemId)
+    {
+        if (itemId / 1_000_000 == 1)
+        {
+            var category = Category(itemId);
+            if (category is null || _characterWz is null) return null;
+            return _characterWz.GetItem($"{category}/{itemId:D8}.img/info") as WzProperty;
+        }
+        if (_itemWz is null) return null;
+        var folder = (itemId / 1_000_000) switch
+        {
+            2 => "Consume", 3 => "Install", 4 => "Etc", 5 => "Cash", _ => (string?)null,
+        };
+        if (folder is null) return null;
+        return _itemWz.GetItem($"{folder}/{itemId / 10000:D4}.img/{itemId:D8}/info") as WzProperty;
+    }
+
+    private static int I(WzProperty p, string key) => p.Get(key) switch
+    {
+        int i => i, short s => s, long l => (int)l, byte b => b, _ => 0,
+    };
 
     // Equip (1xxxxxx): Character.wz/<Category>/<id:D8>.img/info/icon
     private WzSprite? LoadEquipIcon(int itemId)
@@ -112,3 +177,17 @@ public sealed class ItemIconLoader
         };
     }
 }
+
+/// <summary>Parsed item attributes for the tooltip (a subset of the WZ <c>info</c> node):
+/// requirements + stat bonuses. Stat values are the item's base WZ values.</summary>
+public sealed class ItemAttr
+{
+    public bool IsEquip;
+    public int  Category;     // itemId / 10000
+    public int  ReqLevel, ReqStr, ReqDex, ReqInt, ReqLuk, ReqFame, ReqJob;
+    public int  IncStr, IncDex, IncInt, IncLuk;
+    public int  IncPad, IncMad, IncPdd, IncMdd, IncMhp, IncMmp, IncAcc, IncEva, IncSpeed, IncJump;
+    public int  AttackSpeed, Upgrades;
+    public bool Cash, Only;
+}
+

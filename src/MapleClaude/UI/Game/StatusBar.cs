@@ -94,8 +94,8 @@ public sealed class StatusBar : GamePanel
     // Bottom-bar "Menu" pop-up submenu (authentic StatusBar2.img/mainBar/Menu). The "System" button
     // no longer opens an in-bar pop-up — it fires OnSystem, which GameStage routes to the authentic
     // CUIGameMenu (see UI/Game/GameMenu.cs).
-    private Button? _btMenu;
-    private SubMenu? _menuPopup, _openPopup;
+    private Button? _btMenu, _btSystem;
+    private SubMenu? _menuPopup, _systemPopup, _openPopup;
 
     public StatusBar(WzTextureLoader loader, WzPackage? ui, BuiltInFont? font, BuiltInFont? smallFont = null)
     {
@@ -152,10 +152,12 @@ public sealed class StatusBar : GamePanel
         AddButton(loader, bar, "BtKeysetting",() => OnKeys?.Invoke());
         AddButton(loader, bar, "BtChannel",   () => OnChannel?.Invoke());
         AddButton(loader, bar, "BtCashShop",  () => OnCashShop?.Invoke());
-        // BtMenu opens the authentic vertical pop-up submenu (built below); we keep a reference so the
-        // pop-up can anchor above it. BtSystem fires OnSystem → GameStage opens the CUIGameMenu.
-        _btMenu = AddButtonRef(loader, bar, "BtMenu", () => Toggle(_menuPopup));
-        AddButton(loader, bar, "BtSystem", () => OnSystem?.Invoke());
+        // BtMenu / BtSystem each open an authentic vertical pop-up submenu (built below); we keep
+        // references so each pop-up can anchor above its owning button. ESC still opens the legacy
+        // CUIGameMenu directly (GameStage), but the bottom-bar System button uses the MODERN
+        // StatusBar2 System pop-up the user expects.
+        _btMenu   = AddButtonRef(loader, bar, "BtMenu",   () => Toggle(_menuPopup));
+        _btSystem = AddButtonRef(loader, bar, "BtSystem", () => Toggle(_systemPopup));
         AddButton(loader, bar, "BtMTS",       () => OnMTS?.Invoke());
         AddButton(loader, bar, "BtChat",      () => OnChat?.Invoke());
         AddButton(loader, bar, "BtClaim",     () => OnClaim?.Invoke());
@@ -173,6 +175,20 @@ public sealed class StatusBar : GamePanel
                 ("BtQuest",     () => { _openPopup = null; OnQuest?.Invoke(); }),
                 ("BtMSN",       () => { _openPopup = null; OnMessenger?.Invoke(); }),
                 ("BtRank",      () => { _openPopup = null; OnRanking?.Invoke(); }),
+            });
+
+        // Authentic bottom-bar System pop-up (StatusBar2.img/mainBar/System — the MODERN v95 art,
+        // NOT the legacy UIWindow GameMenu). Buttons: Change Channel, Key Setting, Game Option,
+        // System Option, Quit Game, JoyPad (all 63×25 baked-label image buttons).
+        if (_btSystem != null)
+            _systemPopup = new SubMenu(loader, bar?.Get("System") as WzProperty, _btSystem, new (string, Action)[]
+            {
+                ("BtChannel",      () => { _openPopup = null; OnChannel?.Invoke(); }),
+                ("BtKeySetting",   () => { _openPopup = null; OnKeys?.Invoke(); }),
+                ("BtGameOption",   () => { _openPopup = null; OnGameOption?.Invoke(); }),
+                ("BtSystemOption", () => { _openPopup = null; OnSystemOption?.Invoke(); }),
+                ("BtGameQuit",     () => { _openPopup = null; OnQuit?.Invoke(); }),
+                ("BtJoyPad",       () => { _openPopup = null; OnJoyPad?.Invoke(); }),
             });
     }
 

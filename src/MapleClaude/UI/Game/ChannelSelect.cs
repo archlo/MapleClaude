@@ -8,193 +8,161 @@ using Microsoft.Xna.Framework.Input;
 namespace MapleClaude.UI.Game;
 
 /// <summary>
-/// Mid-game channel-change popup.
-/// Shows current channel, grid of available channels, and Change/Cancel buttons.
-/// Channel buttons are enabled/disabled based on population data.
-/// WZ: UIWindow2.img/Channel/ (or Login.img/WorldSelect/)
+/// In-game channel-change dialog — the authentic v95 <c>CUIChannelShift</c>, drawn from
+/// <c>UIWindow2.img/Channel</c> (the MODERN art; NOT the login <c>CUIChannelSelect</c>).
+///
+/// Layout is WZ-origin baked like the other v95 windows: a 3-layer background
+/// (<c>backgrnd</c>/<c>backgrnd2</c>/<c>backgrnd3</c>, 370×168) plus a 5-column channel grid of
+/// <c>channel0</c> (normal) / <c>channel1</c> (selected) cell sprites with <c>ch/&lt;i&gt;</c> number
+/// labels centred on each, an optional <c>world/&lt;id&gt;</c> name label, and the
+/// <c>BtChange</c>/<c>BtCancel</c> buttons. Cell rects are a port of
+/// <c>CUIChannelShift::GetRectFromIdx</c>: <c>left=70·(i%5)+11, top=20·(i/5)+55</c>, 68×20.
 /// </summary>
 public sealed class ChannelSelect : GamePanel
 {
-    private const int Cols    = 5;
-    private const int BtnW    = 60;
-    private const int BtnH    = 24;
-    private const int BtnGapX = 4;
-    private const int BtnGapY = 4;
-    private const int PanelW  = Cols * (BtnW + BtnGapX) + 20;
-    private const int PanelH  = 200;
+    private const int CellW = 68, CellH = 20, Cols = 5;
+    private const int GridX = 11, GridY = 55, PitchX = 70, PitchY = 20;
+    private const int MaxChannels = 20;
 
-    private readonly WzSprite? _background;
-    private readonly WzSprite? _chSelected;
-    private readonly WzSprite? _chNormal;
-    private readonly WzSprite? _chDisabled;
-    private readonly Button?   _btChange;
-    private readonly Button?   _btCancel;
+    private readonly WzSprite?[] _bg = new WzSprite?[3];
+    private readonly WzSprite?   _cellNormal;
+    private readonly WzSprite?   _cellSelected;
+    private readonly WzSprite?[] _chNum = new WzSprite?[32];
+    private readonly WzSprite?[] _world = new WzSprite?[24];
+    private readonly Button?     _btChange;
+    private readonly Button?     _btCancel;
     private readonly List<Button> _allButtons = new();
+    private readonly BuiltInFont? _font;
 
-    private int   _currentChannel  = 1;
-    private int   _selectedChannel = 1;
-    private int   _channelCount    = 20;
-    private bool  _dragging;
+    private int  _currentChannel  = 1;   // 1-based (highlighted as "you are here")
+    private int  _selectedChannel = 1;   // 1-based (the cell the user clicked)
+    private int  _channelCount    = MaxChannels;
+    private int  _worldId         = -1;  // -1 = unknown → no world-name label
+    private bool _dragging;
     private Vector2 _dragOff;
 
-    // Per-channel population (0-100, -1 = unavailable)
-    private readonly int[] _population = new int[20];
-
+    /// <summary>Raised with the 1-based channel number when the user confirms a change.</summary>
     public Action<int>? OnChannelChange { get; set; }
-
-    private readonly BuiltInFont? _font;
 
     public ChannelSelect(WzTextureLoader loader, WzPackage? ui, BuiltInFont? font)
     {
         _font = font;
         IsVisible = false;
-        Position = new Vector2(280, 200);
+        Position = new Vector2(300, 200);
 
-        var ch = ui?.GetItem("UIWindow2.img/Channel") as WzProperty
-              ?? ui?.GetItem("Login.img/WorldSelect") as WzProperty;
+        var ch = ui?.GetItem("UIWindow2.img/Channel") as WzProperty;
+        _bg[0]        = Canvas(loader, ch, "backgrnd");
+        _bg[1]        = Canvas(loader, ch, "backgrnd2");
+        _bg[2]        = Canvas(loader, ch, "backgrnd3");
+        _cellNormal   = Canvas(loader, ch, "channel0");
+        _cellSelected = Canvas(loader, ch, "channel1");
 
-        _background  = ch?.Get("backgrnd")   is WzCanvas bc ? loader.Load(bc) : null;
-        _chSelected  = LoadFromProp(loader, ch, "channel/chSelect");
-        _chNormal    = LoadFromProp(loader, ch, "channel/0/normal");
-        _chDisabled  = LoadFromProp(loader, ch, "channel/0/disabled");
+        var chNum = ch?.Get("ch") as WzProperty;
+        for (var i = 0; i < _chNum.Length; i++) _chNum[i] = Canvas(loader, chNum, i.ToString());
+        var world = ch?.Get("world") as WzProperty;
+        for (var i = 0; i < _world.Length; i++) _world[i] = Canvas(loader, world, i.ToString());
 
-        _btChange = MakeBtn(loader, ch, "BtGoworld",
+        _btChange = MakeBtn(loader, ch, "BtChange",
             () => { OnChannelChange?.Invoke(_selectedChannel); IsVisible = false; });
-        _btCancel = MakeBtn(loader, ch, "BtBack",
-            () => IsVisible = false);
-
-        // Default population: channels 1-5 enabled, rest disabled for placeholder
-        for (var i = 0; i < 20; i++)
-            _population[i] = i < 5 ? (i * 17 + 20) : -1;
-
-        LayoutButtons();
+        _btCancel = MakeBtn(loader, ch, "BtCancel", () => IsVisible = false);
     }
 
-    public void Show(int currentChannel, int channelCount, int[] population)
+    /// <summary>Populate the dialog before showing it (current channel highlighted, world label
+    /// chosen). All optional — toggling <see cref="GamePanel.IsVisible"/> directly keeps the defaults.</summary>
+    public void Show(int currentChannel, int channelCount, int worldId = -1)
     {
-        _currentChannel  = currentChannel;
-        _selectedChannel = currentChannel;
-        _channelCount    = Math.Min(channelCount, 20);
-        population.AsSpan(0, Math.Min(population.Length, 20)).CopyTo(_population);
-        IsVisible = true;
+        _currentChannel  = Math.Max(1, currentChannel);
+        _selectedChannel = _currentChannel;
+        _channelCount    = Math.Clamp(channelCount, 1, MaxChannels);
+        _worldId         = worldId;
+        IsVisible        = true;
     }
 
-    // ── Update ────────────────────────────────────────────────────────────────
+    private int PanelW => _bg[0]?.Width ?? 370;
+    private int PanelH => _bg[0]?.Height ?? 168;
 
     public override void Update(GameTime gt)
     {
+        if (!IsVisible) return;
         LayoutButtons();
         var m = Mouse.GetState();
         if (_dragging)
         {
-            if (m.LeftButton == ButtonState.Pressed)
-                Position = new Vector2(m.X, m.Y) - _dragOff;
+            if (m.LeftButton == ButtonState.Pressed) Position = new Vector2(m.X, m.Y) - _dragOff;
             else _dragging = false;
         }
+        foreach (var b in _allButtons) b.Update(m.X, m.Y, m.LeftButton == ButtonState.Pressed);
     }
-
-    // ── Draw ──────────────────────────────────────────────────────────────────
 
     public override void Draw(SpriteBatch sb, Texture2D white)
     {
         if (!IsVisible) return;
 
-        var px = (int)Position.X;
-        var py = (int)Position.Y;
-
-        if (_background != null)
-            _background.Draw(sb, Position + new Vector2(PanelW / 2f, PanelH / 2f));
+        if (_bg[0] != null)
+        {
+            for (var i = 0; i < 3; i++) _bg[i]?.Draw(sb, Position);
+        }
         else
         {
-            sb.Draw(white, new Rectangle(px, py, PanelW, PanelH), new Color(12, 14, 24, 245));
-            DrawBorder(sb, white, new Rectangle(px, py, PanelW, PanelH), new Color(60, 70, 110));
+            var r = new Rectangle((int)Position.X, (int)Position.Y, PanelW, PanelH);
+            sb.Draw(white, r, new Color(12, 14, 24, 245));
+            DrawBorder(sb, white, r, new Color(60, 70, 110));
+            _font?.Draw(sb, "Change Channel", Position + new Vector2(12, 8), new Color(220, 200, 150));
         }
 
-        // Title
-        sb.Draw(white, new Rectangle(px, py, PanelW, 28), new Color(15, 18, 38));
-        _font?.Draw(sb, "Channel Select", new Vector2(px + 60, py + 8), new Color(220, 200, 150));
-        _font?.Draw(sb, $"Current: CH {_currentChannel}", new Vector2(px + 4, py + 8), new Color(160, 200, 160));
+        // World name label, centred near the top (only when the world id is known).
+        if (_worldId >= 0 && _worldId < _world.Length && _world[_worldId] is { } wl)
+            wl.Draw(sb, Position + new Vector2((PanelW - wl.Width) / 2f, 31));
 
-        // Channel grid
-        var rows = (_channelCount + Cols - 1) / Cols;
-        for (var r = 0; r < rows; r++)
-        for (var c = 0; c < Cols; c++)
+        // Channel grid: a cell sprite (selected vs normal) + the channel-number label, per channel.
+        for (var i = 0; i < _channelCount; i++)
         {
-            var ch  = r * Cols + c + 1;
-            if (ch > _channelCount) break;
-            var cx  = px + 8 + c * (BtnW + BtnGapX);
-            var cy  = py + 36 + r * (BtnH + BtnGapY);
-            var pop = _population[ch - 1];
-            DrawChannelBtn(sb, white, cx, cy, ch, pop);
+            var cell    = CellTopLeft(i);
+            var oneBased = i + 1;
+            var bgCell  = oneBased == _selectedChannel ? _cellSelected : _cellNormal;
+            bgCell?.Draw(sb, cell);
+            var num = i < _chNum.Length ? _chNum[i] : null;
+            if (num != null)
+                num.Draw(sb, cell + new Vector2((CellW - num.Width) / 2f, (CellH - num.Height) / 2f));
+            else
+                _font?.Draw(sb, oneBased.ToString(), cell + new Vector2(26, 4),
+                    oneBased == _selectedChannel ? Color.White : new Color(60, 50, 35));
+            // A small "current channel" tick so the player can tell where they already are.
+            if (oneBased == _currentChannel && oneBased != _selectedChannel)
+                sb.Draw(white, new Rectangle((int)cell.X + 2, (int)cell.Y + CellH - 3, CellW - 4, 2),
+                    new Color(90, 160, 220));
         }
 
         foreach (var b in _allButtons) b.Draw(sb);
     }
 
-    private void DrawChannelBtn(SpriteBatch sb, Texture2D white,
-        int x, int y, int ch, int pop)
-    {
-        var isSel     = ch == _selectedChannel;
-        var isCurrent = ch == _currentChannel;
-        var disabled  = pop < 0;
-
-        Color fill, border, text;
-        if (disabled) { fill = new Color(20, 20, 30);   border = new Color(40, 40, 55);   text = new Color(70, 70, 80); }
-        else if (isSel)  { fill = new Color(40, 70, 40); border = new Color(80, 160, 80);  text = Color.White; }
-        else if (isCurrent){ fill = new Color(30, 45, 60); border = new Color(60, 120, 180); text = new Color(140, 200, 255); }
-        else             { fill = new Color(24, 26, 44); border = new Color(50, 55, 85);   text = new Color(180, 185, 210); }
-
-        var r = new Rectangle(x, y, BtnW, BtnH);
-        sb.Draw(white, r, fill);
-        DrawBorder(sb, white, r, border);
-        _font?.Draw(sb, $"CH {ch}", new Vector2(x + 8, y + 5), text);
-
-        // Population bar (bottom 3px of button)
-        if (!disabled && pop >= 0)
-        {
-            var barW  = (int)(BtnW * pop / 100f);
-            var popColor = pop < 40 ? new Color(80, 180, 80) : pop < 70 ? new Color(220, 180, 40) : new Color(220, 70, 70);
-            sb.Draw(white, new Rectangle(x, y + BtnH - 3, barW, 3), popColor);
-        }
-    }
-
-    // ── Input ─────────────────────────────────────────────────────────────────
+    private Vector2 CellTopLeft(int i) =>
+        Position + new Vector2(PitchX * (i % Cols) + GridX, PitchY * (i / Cols) + GridY);
 
     public override bool HandleMouseButton(int x, int y, bool down)
     {
         if (!IsVisible) return false;
+        foreach (var b in _allButtons) if (b.HandleMouseButton(x, y, down)) return true;
 
-        foreach (var b in _allButtons)
-            if (b.HandleMouseButton(x, y, down)) return true;
-
-        // Channel grid hit-test
         if (down)
         {
-            var px = (int)Position.X;
-            var py = (int)Position.Y;
-            var rows = (_channelCount + Cols - 1) / Cols;
-            for (var r = 0; r < rows; r++)
-            for (var c = 0; c < Cols; c++)
+            for (var i = 0; i < _channelCount; i++)
             {
-                var ch  = r * Cols + c + 1;
-                if (ch > _channelCount) continue;
-                var cx  = px + 8 + c * (BtnW + BtnGapX);
-                var cy  = py + 36 + r * (BtnH + BtnGapY);
-                if (new Rectangle(cx, cy, BtnW, BtnH).Contains(x, y) && _population[ch - 1] >= 0)
+                var c = CellTopLeft(i);
+                if (new Rectangle((int)c.X, (int)c.Y, CellW, CellH).Contains(x, y))
                 {
-                    _selectedChannel = ch;
+                    _selectedChannel = i + 1;
                     return true;
                 }
             }
-
-            var titleBar = new Rectangle(px, py, PanelW, 28);
-            if (titleBar.Contains(x, y))
+            var title = new Rectangle((int)Position.X, (int)Position.Y, PanelW, 22);
+            if (title.Contains(x, y))
             {
                 _dragging = true;
                 _dragOff  = new Vector2(x - Position.X, y - Position.Y);
+                return true;
             }
         }
-
         return new Rectangle((int)Position.X, (int)Position.Y, PanelW, PanelH).Contains(x, y);
     }
 
@@ -206,31 +174,18 @@ public sealed class ChannelSelect : GamePanel
         return true;
     }
 
-    // ── Helpers ───────────────────────────────────────────────────────────────
-
     private void LayoutButtons()
     {
-        if (_btChange != null) _btChange.Position = Position + new Vector2(PanelW - 100, PanelH - 26);
-        if (_btCancel != null) _btCancel.Position = Position + new Vector2(PanelW - 50,  PanelH - 26);
+        if (_btChange != null) _btChange.Position = Position;
+        if (_btCancel != null) _btCancel.Position = Position;
     }
 
-    private static WzSprite? LoadFromProp(WzTextureLoader loader, WzProperty? root, string path)
-    {
-        if (root is null) return null;
-        var parts = path.Split('/');
-        var cur = root;
-        for (var i = 0; i < parts.Length - 1; i++)
-        {
-            cur = cur?.Get(parts[i]) as WzProperty;
-            if (cur is null) return null;
-        }
-        return cur?.Get(parts[^1]) is WzCanvas c ? loader.Load(c) : null;
-    }
+    private static WzSprite? Canvas(WzTextureLoader loader, WzProperty? parent, string name)
+        => parent?.Get(name) is WzCanvas c ? loader.Load(c) : null;
 
     private Button? MakeBtn(WzTextureLoader loader, WzProperty? root, string name, Action onClick)
     {
-        var pr = root?.Get(name) as WzProperty;
-        if (pr is null) return null;
+        if (root?.Get(name) is not WzProperty pr) return null;
         var b = new Button(loader, pr) { OnClick = onClick };
         _allButtons.Add(b);
         return b;

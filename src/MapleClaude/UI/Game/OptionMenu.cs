@@ -8,319 +8,192 @@ using Microsoft.Xna.Framework.Input;
 namespace MapleClaude.UI.Game;
 
 /// <summary>
-/// Options / settings panel. Opened from the settings menu button.
-/// WZ: <c>UIWindow.img/OptionMenu/</c>
+/// System / Game Options dialog — the authentic v95 <c>CUISysOpt</c>, drawn from
+/// <c>UIWindow.img/SysOpt/backgrnd</c> (the real "SYSTEM OPTION" panel; the old code loaded a
+/// non-existent <c>UIWindow.img/OptionMenu</c> node and fell back to hand-drawn chrome — that was
+/// the "old UI" the user saw). The 299×366 background bakes every row label (Picture Quality, BGM,
+/// Sound, Screen Shot, Mouse Cursor, HP/MP Alert, Shake, Monster Info, Viewing Mode); the
+/// interactive widgets are overlaid at the exact <c>CUISysOpt::OnCreate</c> coordinates.
+///
+/// Only the settings this client actually supports are wired (BGM/SFX volume + mute). The volume
+/// tracks are <c>SOFT … LOUD</c> baked into the panel; a knob slides x∈[95,191] on each. Changes
+/// apply live and persist on close. (The legacy hand-drawn resolution selector is gone — v95's
+/// panel only offers windowed/fullscreen, which this single-window client renders as windowed; the
+/// saved resolution is preserved untouched.)
 /// </summary>
 public sealed class OptionMenu : GamePanel
 {
+    // ── CUISysOpt::OnCreate coordinates (window-relative) ─────────────────────────
+    private const int BgmSliderX = 95, BgmSliderY = 91, SliderLen = 96;
+    private const int SfxSliderX = 95, SfxSliderY = 121;
+    private const int BgmMuteX = 223, BgmMuteY = 90;
+    private const int SfxMuteX = 223, SfxMuteY = 120;
+    private const int KnobW = 6, KnobH = 14;
+
     private readonly WzSprite? _background;
-    private readonly Button? _btClose;
-    private readonly Button? _btOk;
-    private readonly Button? _btCancel;
+    private readonly WzSprite? _checkOff;
+    private readonly WzSprite? _checkOn;
+    private readonly Button?   _btClose;
     private readonly BuiltInFont? _font;
-    private readonly List<Button> _allButtons = new();
 
-    // ── Settings state ────────────────────────────────────────────────────────
-    private int  _bgmVolume   = 80;
-    private int  _sfxVolume   = 100;
-    private bool _showDamage  = true;
-    private bool _showNames   = true;
-    private bool _showHpBars  = true;
-    private bool _showFps     = false;
-    private bool _miniMapStart = true;
-    private bool _snowEffect  = false;
+    // ── Settings ──────────────────────────────────────────────────────────────
+    private int  _bgmVolume = 80;
+    private int  _sfxVolume = 100;
+    private bool _bgmMute;
+    private bool _sfxMute;
+    private int  _resW = 1024, _resH = 768;   // preserved across the dialog (no authentic control)
 
-    private static readonly (int W, int H)[] Resolutions =
-    {
-        (800, 600), (1024, 768), (1366, 768), (1600, 900), (1920, 1080), (2560, 1440),
-    };
-    private int _resIndex = 1;        // default 1024×768
-    private int _savedResIndex = 1;
+    private bool _dragBgm, _dragSfx;
 
-    // Saved state for cancel
-    private int  _savedBgm, _savedSfx;
-    private bool _savedDmg, _savedNames, _savedHp, _savedFps, _savedMm, _savedSnow;
-
-    private const int PanelW = 398;
-    private const int PanelH = 388;
+    private int PanelW => _background?.Width ?? 299;
+    private int PanelH => _background?.Height ?? 366;
 
     public OptionMenu(WzTextureLoader loader, WzPackage? ui, BuiltInFont? font)
     {
         _font = font;
         IsVisible = false;
-        Position = new Vector2(200, 80);
+        Position = new Vector2(220, 120);
 
-        var opt = ui?.GetItem("UIWindow.img/OptionMenu") as WzProperty;
+        var opt = ui?.GetItem("UIWindow.img/SysOpt") as WzProperty;
         _background = opt?.Get("backgrnd") is WzCanvas bc ? loader.Load(bc) : null;
 
-        _btClose  = MakeButton(loader, opt, "BtClose",  () => Cancel());
-        _btOk     = MakeButton(loader, opt, "BtOK",     () => Accept());
-        _btCancel = MakeButton(loader, opt, "BtCancel", () => Cancel());
+        var cb = ui?.GetItem("Basic.img/CheckBox") as WzProperty;
+        _checkOff = cb?.Get("0") is WzCanvas c0 ? loader.Load(c0) : null;
+        _checkOn  = cb?.Get("1") is WzCanvas c1 ? loader.Load(c1) : null;
 
-        ApplyLayout();
+        // Standard CUIWnd close button, top-right of the panel.
+        if (ui?.GetItem("Basic.img/BtClose3") is WzProperty close)
+            _btClose = new Button(loader, close) { OnClick = Close };
     }
 
-    /// <summary>BGM volume, 0–100.</summary>
-    public int BgmVolume => _bgmVolume;
-    /// <summary>SFX volume, 0–100.</summary>
-    public int SfxVolume => _sfxVolume;
+    // ── Public API (consumed by GameStage) ───────────────────────────────────────
+    public int BgmVolume => _bgmMute ? 0 : _bgmVolume;
+    public int SfxVolume => _sfxMute ? 0 : _sfxVolume;
+    public int ResW => _resW;
+    public int ResH => _resH;
 
-    /// <summary>Selected in-game resolution.</summary>
-    public int ResW => Resolutions[_resIndex].W;
-    public int ResH => Resolutions[_resIndex].H;
-
-    /// <summary>Fired when the user commits changes (OK), so the host can persist
-    /// them and apply the new volumes live.</summary>
+    /// <summary>Fired whenever a setting changes (volume drag / mute / close), so the host applies
+    /// volumes live and persists them.</summary>
     public event Action? OnSettingsChanged;
 
-    /// <summary>Fired immediately when the resolution selector changes, so the host applies it live
-    /// (and reverts it on Cancel).</summary>
-    public event Action? OnResolutionChanged;
-
-    /// <summary>Apply previously-persisted volumes (clamped to 0–100).</summary>
     public void LoadVolumes(int bgm, int sfx)
     {
         _bgmVolume = Math.Clamp(bgm, 0, 100);
         _sfxVolume = Math.Clamp(sfx, 0, 100);
     }
 
-    /// <summary>Select the saved in-game resolution (defaults to 1024×768 if unknown).</summary>
     public void LoadResolution(int w, int h)
     {
-        for (var i = 0; i < Resolutions.Length; i++)
-            if (Resolutions[i].W == w && Resolutions[i].H == h) { _resIndex = i; _savedResIndex = i; return; }
-        _resIndex = 1; _savedResIndex = 1;
+        if (w > 0) _resW = w;
+        if (h > 0) _resH = h;
     }
 
-    private void Accept()
+    private void Close()
     {
         IsVisible = false;
         OnSettingsChanged?.Invoke();
     }
 
-    private void Cancel()
+    // ── Update / input ────────────────────────────────────────────────────────
+    public override void Update(GameTime gameTime)
     {
-        _bgmVolume   = _savedBgm;
-        _sfxVolume   = _savedSfx;
-        _showDamage  = _savedDmg;
-        _showNames   = _savedNames;
-        _showHpBars  = _savedHp;
-        _showFps     = _savedFps;
-        _miniMapStart = _savedMm;
-        _snowEffect  = _savedSnow;
-        _resIndex    = _savedResIndex;
-        OnResolutionChanged?.Invoke();   // revert any live resolution preview
-        IsVisible    = false;
+        if (!IsVisible) return;
+        if (_btClose != null) _btClose.Position = Position + new Vector2(PanelW - 18, 6);
+
+        var m = Mouse.GetState();
+        var held = m.LeftButton == ButtonState.Pressed;
+        _btClose?.Update(m.X, m.Y, held);
+
+        if (held && _dragBgm) { SetVolume(ref _bgmVolume, m.X); OnSettingsChanged?.Invoke(); }
+        if (held && _dragSfx) { SetVolume(ref _sfxVolume, m.X); OnSettingsChanged?.Invoke(); }
+        if (!held) { _dragBgm = _dragSfx = false; }
     }
 
-    private void SaveState()
+    private void SetVolume(ref int vol, int mouseX)
     {
-        _savedBgm   = _bgmVolume;
-        _savedSfx   = _sfxVolume;
-        _savedDmg   = _showDamage;
-        _savedNames = _showNames;
-        _savedHp    = _showHpBars;
-        _savedFps   = _showFps;
-        _savedMm    = _miniMapStart;
-        _savedSnow  = _snowEffect;
-        _savedResIndex = _resIndex;
+        var rel = mouseX - (Position.X + BgmSliderX);
+        vol = (int)Math.Clamp(rel / SliderLen * 100f, 0, 100);
     }
-
-    public new bool IsVisible
-    {
-        get => base.IsVisible;
-        set { if (value) SaveState(); base.IsVisible = value; }
-    }
-
-    private void ApplyLayout()
-    {
-        if (_btClose  != null) _btClose.Position  = Position + new Vector2(380, 6);
-        if (_btOk     != null) _btOk.Position     = Position + new Vector2(268, 358);
-        if (_btCancel != null) _btCancel.Position = Position + new Vector2(328, 358);
-    }
-
-    public override void Update(GameTime gameTime) => ApplyLayout();
 
     public override void Draw(SpriteBatch sb, Texture2D white)
     {
         if (!IsVisible) return;
-        ApplyLayout();
 
-        var px = (int)Position.X;
-        var py = (int)Position.Y;
-
-        // Background
         if (_background != null)
-            _background.Draw(sb, Position + new Vector2(195, 190));
+            _background.Draw(sb, Position);
         else
         {
-            sb.Draw(white, new Rectangle(px, py, PanelW, PanelH), new Color(15, 15, 25, 230));
-            DrawBorder(sb, white, new Rectangle(px, py, PanelW, PanelH));
+            var r = new Rectangle((int)Position.X, (int)Position.Y, PanelW, PanelH);
+            sb.Draw(white, r, new Color(15, 15, 25, 235));
+            _font?.Draw(sb, "SYSTEM OPTION", Position + new Vector2(12, 6), new Color(220, 200, 150));
         }
 
-        _font?.Draw(sb, "Options", new Vector2(px + 165, py + 5), new Color(220, 200, 150));
+        // Volume knobs on the baked SOFT…LOUD tracks.
+        DrawKnob(sb, white, BgmSliderX, BgmSliderY, _bgmMute ? 0 : _bgmVolume, _bgmMute);
+        DrawKnob(sb, white, SfxSliderX, SfxSliderY, _sfxMute ? 0 : _sfxVolume, _sfxMute);
 
-        var y = py + 28;
+        // Mute checkboxes.
+        DrawCheck(sb, white, BgmMuteX, BgmMuteY, _bgmMute);
+        DrawCheck(sb, white, SfxMuteX, SfxMuteY, _sfxMute);
 
-        // ── Sound ─────────────────────────────────────────────────────────────
-        DrawSectionHeader(sb, white, px + 8, y, PanelW - 16, "Sound");
-        y += 22;
-
-        DrawVolumeControl(sb, white, px + 12, y, "BGM Volume",  ref _bgmVolume);
-        y += 26;
-        DrawVolumeControl(sb, white, px + 12, y, "SFX Volume",  ref _sfxVolume);
-        y += 32;
-
-        // ── Display ───────────────────────────────────────────────────────────
-        DrawSectionHeader(sb, white, px + 8, y, PanelW - 16, "Display");
-        y += 22;
-
-        DrawCheckRow(sb, white, px + 12, y, "Show Damage Numbers", ref _showDamage);  y += 24;
-        DrawCheckRow(sb, white, px + 12, y, "Show Player Names",   ref _showNames);   y += 24;
-        DrawCheckRow(sb, white, px + 12, y, "Show HP/MP Bars",     ref _showHpBars);  y += 24;
-        DrawCheckRow(sb, white, px + 12, y, "Snow Effect",         ref _snowEffect);  y += 32;
-
-        // ── Interface ─────────────────────────────────────────────────────────
-        DrawSectionHeader(sb, white, px + 8, y, PanelW - 16, "Interface");
-        y += 22;
-
-        DrawCheckRow(sb, white, px + 12, y, "Show FPS Counter",       ref _showFps);      y += 24;
-        DrawCheckRow(sb, white, px + 12, y, "Show Mini-Map on Start",  ref _miniMapStart); y += 24;
-        DrawResolutionRow(sb, white, px + 12, y); y += 24;
-
-        foreach (var b in _allButtons) b.Draw(sb);
+        _btClose?.Draw(sb);
     }
 
-    private void DrawSectionHeader(SpriteBatch sb, Texture2D white, int x, int y, int w, string label)
+    private void DrawKnob(SpriteBatch sb, Texture2D white, int x, int y, int vol, bool muted)
     {
-        sb.Draw(white, new Rectangle(x, y + 8, w, 1), new Color(80, 70, 50));
-        _font?.Draw(sb, label, new Vector2(x + 4, y), new Color(200, 180, 120));
+        var trackX = (int)Position.X + x;
+        var trackY = (int)Position.Y + y;
+        // Filled portion of the track (subtle), then the knob.
+        var fill = (int)(SliderLen * Math.Clamp(vol, 0, 100) / 100f);
+        sb.Draw(white, new Rectangle(trackX, trackY + KnobH / 2 - 1, fill, 2),
+            muted ? new Color(120, 120, 120, 160) : new Color(90, 150, 220, 180));
+        var knobX = trackX + fill - KnobW / 2;
+        var knob = new Rectangle(knobX, trackY - 1, KnobW, KnobH);
+        sb.Draw(white, knob, muted ? new Color(150, 150, 150) : new Color(235, 235, 245));
+        DrawBorder(sb, white, knob, new Color(70, 70, 90));
     }
 
-    private void DrawVolumeControl(SpriteBatch sb, Texture2D white, int x, int y, string label, ref int volume)
+    private void DrawCheck(SpriteBatch sb, Texture2D white, int x, int y, bool on)
     {
-        _font?.Draw(sb, label, new Vector2(x, y), new Color(200, 200, 200));
-
-        // 10-step bar
-        var barX = x + 130;
-        for (var i = 0; i < 10; i++)
-        {
-            var segRect = new Rectangle(barX + i * 16, y + 1, 14, 12);
-            var filled  = i < volume / 10;
-            sb.Draw(white, segRect, filled ? new Color(80, 160, 220) : new Color(30, 30, 60));
-            DrawBorder(sb, white, segRect);
-        }
-
-        // Volume label
-        _font?.Draw(sb, $"{volume}%", new Vector2(barX + 164, y), new Color(160, 200, 255));
-    }
-
-    private void DrawCheckRow(SpriteBatch sb, Texture2D white, int x, int y, string label, ref bool value)
-    {
-        // Checkbox box
-        var box = new Rectangle(x, y + 1, 12, 12);
+        var spr = on ? _checkOn : _checkOff;
+        if (spr != null) { spr.Draw(sb, Position + new Vector2(x, y)); return; }
+        var box = new Rectangle((int)Position.X + x, (int)Position.Y + y, 11, 11);
         sb.Draw(white, box, new Color(25, 25, 50));
-        DrawBorder(sb, white, box);
-        if (value)
-        {
-            sb.Draw(white, new Rectangle(x + 2, y + 3, 8, 6), new Color(100, 220, 100));
-        }
-
-        _font?.Draw(sb, label, new Vector2(x + 18, y), new Color(200, 200, 200));
-    }
-
-    private void DrawResolutionRow(SpriteBatch sb, Texture2D white, int x, int y)
-    {
-        _font?.Draw(sb, "Resolution", new Vector2(x, y), new Color(200, 200, 200));
-        var (rw, rh) = Resolutions[_resIndex];
-        _font?.Draw(sb, "<", new Vector2(x + 130, y), new Color(160, 200, 255));
-        _font?.Draw(sb, $"{rw} x {rh}", new Vector2(x + 148, y), new Color(225, 225, 225));
-        _font?.Draw(sb, ">", new Vector2(x + 232, y), new Color(160, 200, 255));
+        DrawBorder(sb, white, box, new Color(80, 70, 50));
+        if (on) sb.Draw(white, new Rectangle(box.X + 2, box.Y + 2, 7, 7), new Color(100, 220, 100));
     }
 
     public override bool HandleMouseButton(int x, int y, bool down)
     {
         if (!IsVisible) return false;
-        foreach (var b in _allButtons)
-            if (b.HandleMouseButton(x, y, down)) return true;
+        if (_btClose?.HandleMouseButton(x, y, down) == true) return true;
+        if (!down) return new Rectangle((int)Position.X, (int)Position.Y, PanelW, PanelH).Contains(x, y);
 
-        var px = (int)Position.X;
-        var py = (int)Position.Y;
+        // Mute checkboxes (11×11 hit boxes).
+        if (Hit(x, y, BgmMuteX, BgmMuteY, 13, 13)) { _bgmMute = !_bgmMute; OnSettingsChanged?.Invoke(); return true; }
+        if (Hit(x, y, SfxMuteX, SfxMuteY, 13, 13)) { _sfxMute = !_sfxMute; OnSettingsChanged?.Invoke(); return true; }
 
-        if (down)
-        {
-            // Volume bar click — BGM at row 50, SFX at row 76
-            TryVolumeClick(x, y, px + 12 + 130, py + 50, ref _bgmVolume);
-            TryVolumeClick(x, y, px + 12 + 130, py + 76, ref _sfxVolume);
+        // Volume tracks (grab to drag; a single click also jumps the knob).
+        if (Hit(x, y, BgmSliderX, BgmSliderY - 3, SliderLen + KnobW, KnobH + 6))
+        { _dragBgm = true; _bgmMute = false; SetVolume(ref _bgmVolume, x); OnSettingsChanged?.Invoke(); return true; }
+        if (Hit(x, y, SfxSliderX, SfxSliderY - 3, SliderLen + KnobW, KnobH + 6))
+        { _dragSfx = true; _sfxMute = false; SetVolume(ref _sfxVolume, x); OnSettingsChanged?.Invoke(); return true; }
 
-            // Checkboxes — positions match DrawCheckRow calls above
-            var cy = py + 28 + 22 + 26 + 32 + 22;   // start of Display checkboxes (matches the Draw y-flow)
-            TryCheckboxClick(x, y, px + 12, cy,      ref _showDamage);
-            TryCheckboxClick(x, y, px + 12, cy + 24, ref _showNames);
-            TryCheckboxClick(x, y, px + 12, cy + 48, ref _showHpBars);
-            TryCheckboxClick(x, y, px + 12, cy + 72, ref _snowEffect);
-
-            var iy = cy + 72 + 32 + 22;  // Interface section
-            TryCheckboxClick(x, y, px + 12, iy,      ref _showFps);
-            TryCheckboxClick(x, y, px + 12, iy + 24, ref _miniMapStart);
-            TryResolutionClick(x, y, px + 12, iy + 48);
-        }
-
-        return new Rectangle(px, py, PanelW, PanelH).Contains(x, y);
+        return new Rectangle((int)Position.X, (int)Position.Y, PanelW, PanelH).Contains(x, y);
     }
 
-    private static void TryVolumeClick(int mx, int my, int barX, int barY, ref int volume)
-    {
-        for (var i = 0; i < 10; i++)
-        {
-            if (new Rectangle(barX + i * 16, barY + 1, 14, 12).Contains(mx, my))
-            {
-                volume = (i + 1) * 10;
-                break;
-            }
-        }
-    }
-
-    private static void TryCheckboxClick(int mx, int my, int cx, int cy, ref bool value)
-    {
-        if (new Rectangle(cx, cy + 1, 12, 12).Contains(mx, my))
-            value = !value;
-    }
-
-    private void TryResolutionClick(int mx, int my, int x, int y)
-    {
-        if (new Rectangle(x + 126, y - 2, 22, 18).Contains(mx, my))
-        {
-            _resIndex = (_resIndex - 1 + Resolutions.Length) % Resolutions.Length;
-            OnResolutionChanged?.Invoke();
-        }
-        else if (new Rectangle(x + 226, y - 2, 26, 18).Contains(mx, my))
-        {
-            _resIndex = (_resIndex + 1) % Resolutions.Length;
-            OnResolutionChanged?.Invoke();
-        }
-    }
+    private bool Hit(int mx, int my, int x, int y, int w, int h) =>
+        new Rectangle((int)Position.X + x, (int)Position.Y + y, w, h).Contains(mx, my);
 
     public override bool OnKeyPress(Keys key)
     {
         if (!IsVisible) return false;
-        if (key == Keys.Escape) { Cancel(); return true; }
-        if (key == Keys.Enter)  { Accept(); return true; }
+        if (key is Keys.Escape or Keys.Enter) { Close(); return true; }
         return true;
     }
 
-    private Button? MakeButton(WzTextureLoader loader, WzProperty? root, string name, Action onClick)
+    private static void DrawBorder(SpriteBatch sb, Texture2D white, Rectangle r, Color c)
     {
-        var pr = root?.Get(name) as WzProperty;
-        if (pr is null) return null;
-        var b = new Button(loader, pr) { OnClick = onClick };
-        _allButtons.Add(b);
-        return b;
-    }
-
-    private static void DrawBorder(SpriteBatch sb, Texture2D white, Rectangle r)
-    {
-        var c = new Color(80, 70, 50);
         sb.Draw(white, new Rectangle(r.X, r.Y, r.Width, 1), c);
         sb.Draw(white, new Rectangle(r.X, r.Bottom - 1, r.Width, 1), c);
         sb.Draw(white, new Rectangle(r.X, r.Y, 1, r.Height), c);

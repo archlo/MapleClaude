@@ -4,12 +4,20 @@ using MapleClaude.Wz;
 using Microsoft.Xna.Framework;
 using Microsoft.Xna.Framework.Graphics;
 using Microsoft.Xna.Framework.Input;
+using System.Linq;
 
 namespace MapleClaude.UI.Game;
 
 /// <summary>
-/// Quest log panel. Toggle with Q key.
-/// WZ: <c>UIWindow.img/QuestLog/</c>
+/// Quest log — the authentic v95 <c>CUIQuestInfo</c> list panel, drawn from
+/// <c>UIWindow2.img/Quest/list</c> (layered backgrounds 235×396). Four category tabs sit at the top
+/// (their baked labels: <b>Available</b>, <b>In Progress</b>, <b>Completed</b>, <b>Party Quest</b>),
+/// each an origin-baked <c>Tab/enabled|disabled/&lt;i&gt;</c> sprite. The selected category's quests
+/// are listed below with a scroll; an empty category shows its <c>notice&lt;i&gt;</c> message.
+///
+/// Data: In Progress / Completed come from the server quest records we hold. "Available" needs the
+/// not-yet-started quest set (Quest.wz Check requirements) which isn't tracked client-side yet, so
+/// that tab + Party Quest render their empty-state notice for now.
 /// </summary>
 public sealed class QuestLog : GamePanel
 {
@@ -21,21 +29,30 @@ public sealed class QuestLog : GamePanel
         public bool   Complete;
     }
 
-    private readonly WzSprite? _background;
+    // Tab indices.
+    private const int TabAvailable = 0, TabInProgress = 1, TabCompleted = 2, TabParty = 3;
+
+    private readonly WzSprite? _bg, _bg2;
+    private readonly WzSprite?[] _tabOn  = new WzSprite?[4];
+    private readonly WzSprite?[] _tabOff = new WzSprite?[4];
+    private readonly WzSprite?[] _notice = new WzSprite?[4];
     private readonly Button? _btClose;
     private readonly BuiltInFont? _font;
 
-    // Tabs
-    private int _tab; // 0=In Progress, 1=Complete
+    // Tab hit-rects (from Tab/enabled origins): x, width; all at y=25, h=22.
+    private static readonly int[] TabX = { 9, 59, 117, 169 };
+    private static readonly int[] TabW = { 49, 57, 51, 57 };
+
+    private int _tab = TabInProgress;
     private int _scroll;
     private int _selected = -1;
+    private bool _dragging;
+    private Vector2 _dragOff;
 
     private readonly List<QuestEntry> _quests = new();
 
-    /// <summary>Resign (give up) an in-progress quest. Arg = quest id.</summary>
     public Action<int>? OnResign { get; set; }
 
-    /// <summary>Replace the quest list (from CharacterData on SetField).</summary>
     public void SetQuests(IEnumerable<QuestEntry> quests)
     {
         _quests.Clear();
@@ -43,15 +60,10 @@ public sealed class QuestLog : GamePanel
         _selected = -1;
     }
 
-    /// <summary>Apply a live quest record change. state: 0=removed, 1=active, 2=complete.</summary>
     public void UpdateQuest(int id, byte state, string progress, string name)
     {
         var existing = _quests.Find(q => q.Id == id);
-        if (state == 0) // removed / resigned
-        {
-            if (existing != null) _quests.Remove(existing);
-            return;
-        }
+        if (state == 0) { if (existing != null) _quests.Remove(existing); return; }
         existing ??= AddQuest(id, name);
         if (!string.IsNullOrEmpty(name)) existing.Name = name;
         existing.Progress = progress;
@@ -65,12 +77,13 @@ public sealed class QuestLog : GamePanel
         return q;
     }
 
-    private const int PanelW = 302;
-    private const int PanelH = 396;
-    private const int EntryH  = 58;
-    private const int ListTop = 58;   // below title + tabs
-    private const int ListBot = 360;  // above scroll arrows
-    private const int VisibleRows = (ListBot - ListTop) / EntryH; // ≈5
+    private const int EntryH = 34;
+    private const int ListTop = 52;
+    private const int ListBot = 372;
+    private int VisibleRows => (ListBot - ListTop) / EntryH;
+
+    private int PanelW => _bg?.Width ?? 235;
+    private int PanelH => _bg?.Height ?? 396;
 
     public QuestLog(WzTextureLoader loader, WzPackage? ui, BuiltInFont? font)
     {
@@ -78,146 +91,127 @@ public sealed class QuestLog : GamePanel
         IsVisible = false;
         Position = new Vector2(50, 50);
 
-        var ql = ui?.GetItem("UIWindow.img/QuestLog") as WzProperty;
-        _background = ql?.Get("backgrnd") is WzCanvas bc ? loader.Load(bc) : null;
+        var list = ui?.GetItem("UIWindow2.img/Quest/list") as WzProperty;
+        _bg  = Canvas(loader, list, "backgrnd");
+        _bg2 = Canvas(loader, list, "backgrnd2");
+        var on  = (list?.Get("Tab") as WzProperty)?.Get("enabled")  as WzProperty;
+        var off = (list?.Get("Tab") as WzProperty)?.Get("disabled") as WzProperty;
+        for (var i = 0; i < 4; i++) { _tabOn[i] = Canvas(loader, on, i.ToString()); _tabOff[i] = Canvas(loader, off, i.ToString()); }
+        for (var i = 0; i < 4; i++) _notice[i] = Canvas(loader, list, $"notice{i}");
 
-        var closeRoot = ql?.Get("BtClose") as WzProperty;
-        if (closeRoot != null)
-            _btClose = new Button(loader, closeRoot)
-            {
-                Position = Position + new Vector2(284, 4),
-                OnClick  = () => IsVisible = false,
-            };
+        if (ui?.GetItem("Basic.img/BtClose3") is WzProperty close)
+            _btClose = new Button(loader, close) { OnClick = () => IsVisible = false };
     }
 
-    private List<QuestEntry> CurrentList =>
-        _quests.Where(q => q.Complete == (_tab == 1)).ToList();
+    private List<QuestEntry> CurrentList => _tab switch
+    {
+        TabInProgress => _quests.Where(q => !q.Complete).ToList(),
+        TabCompleted  => _quests.Where(q => q.Complete).ToList(),
+        _             => new List<QuestEntry>(),   // Available / Party Quest: not tracked yet
+    };
+
+    public override void Update(GameTime gt)
+    {
+        if (!IsVisible) return;
+        if (_btClose != null) _btClose.Position = Position + new Vector2(PanelW - 18, 6);
+        var m = Mouse.GetState();
+        if (_dragging)
+        {
+            if (m.LeftButton == ButtonState.Pressed) Position = new Vector2(m.X, m.Y) - _dragOff;
+            else _dragging = false;
+        }
+        _btClose?.Update(m.X, m.Y, m.LeftButton == ButtonState.Pressed);
+    }
 
     public override void Draw(SpriteBatch sb, Texture2D white)
     {
         if (!IsVisible) return;
-
         var px = (int)Position.X;
         var py = (int)Position.Y;
 
-        // Background
-        if (_background != null)
-            _background.Draw(sb, Position + new Vector2(150, 195));
+        if (_bg != null) { _bg.Draw(sb, Position); _bg2?.Draw(sb, Position); }
         else
         {
             sb.Draw(white, new Rectangle(px, py, PanelW, PanelH), new Color(15, 15, 25, 230));
-            DrawBorder(sb, white, new Rectangle(px, py, PanelW, PanelH));
+            _font?.Draw(sb, "QUEST", new Vector2(px + 100, py + 5), new Color(220, 200, 150));
         }
 
-        // Title
-        _font?.Draw(sb, "Quest Log", new Vector2(px + 110, py + 5), new Color(220, 200, 150));
-
-        // Tabs
-        DrawTab(sb, white, px + 10,  py + 24, 130, "In Progress", _tab == 0);
-        DrawTab(sb, white, px + 148, py + 24, 130, "Complete",    _tab == 1);
-
-        // Separator
-        sb.Draw(white, new Rectangle(px, py + 46, PanelW, 1), new Color(80, 70, 50));
-
-        // Quest list
-        var list  = CurrentList;
-        var maxSc = Math.Max(0, list.Count - VisibleRows);
-        _scroll   = Math.Clamp(_scroll, 0, maxSc);
-
-        for (var i = 0; i < VisibleRows; i++)
+        // Tabs.
+        for (var i = 0; i < 4; i++)
         {
-            var idx = i + _scroll;
-            if (idx >= list.Count) break;
-            DrawEntry(sb, white, list[idx], px + 6, py + ListTop + i * EntryH, list[idx].Id == _selected);
+            var spr = i == _tab ? _tabOn[i] : _tabOff[i];
+            if (spr != null) spr.Draw(sb, Position);
         }
 
-        // Scroll arrows
-        if (_scroll > 0)
-            DrawArrow(sb, white, new Rectangle(px + 138, py + ListBot + 4, 12, 10), true);
-        if (_scroll < maxSc)
-            DrawArrow(sb, white, new Rectangle(px + 154, py + ListBot + 4, 12, 10), false);
-
-        // Empty state
+        var list = CurrentList;
         if (list.Count == 0)
-            _font?.Draw(sb, "(none)", new Vector2(px + 120, py + 180), new Color(140, 140, 140));
+        {
+            // Empty-state message for this category (notice0..3 are centred in the panel).
+            if (_notice[_tab] != null) _notice[_tab]!.Draw(sb, Position);
+            else _font?.Draw(sb, "(none)", new Vector2(px + PanelW / 2f - 18, py + 180), new Color(150, 150, 150));
+        }
+        else
+        {
+            var maxSc = Math.Max(0, list.Count - VisibleRows);
+            _scroll = Math.Clamp(_scroll, 0, maxSc);
+            for (var i = 0; i < VisibleRows; i++)
+            {
+                var idx = i + _scroll;
+                if (idx >= list.Count) break;
+                DrawEntry(sb, white, list[idx], px + 8, py + ListTop + i * EntryH, list[idx].Id == _selected);
+            }
+            if (_scroll > 0)
+                _font?.Draw(sb, "▲", new Vector2(px + PanelW / 2f - 4, py + ListTop - 12), new Color(200, 200, 220));
+            if (_scroll < maxSc)
+                _font?.Draw(sb, "▼", new Vector2(px + PanelW / 2f - 4, py + ListBot + 2), new Color(200, 200, 220));
+        }
 
         _btClose?.Draw(sb);
     }
 
-    private void DrawTab(SpriteBatch sb, Texture2D white, int x, int y, int w, string label, bool active)
-    {
-        var bg = active ? new Color(40, 40, 70, 220) : new Color(20, 20, 40, 160);
-        sb.Draw(white, new Rectangle(x, y, w, 20), bg);
-        DrawBorder(sb, white, new Rectangle(x, y, w, 20));
-        var c = active ? new Color(255, 220, 100) : new Color(180, 180, 180);
-        _font?.Draw(sb, label, new Vector2(x + 8, y + 3), c);
-    }
-
     private void DrawEntry(SpriteBatch sb, Texture2D white, QuestEntry q, int x, int y, bool selected)
     {
-        var bg = selected ? new Color(55, 50, 90, 220) : new Color(25, 25, 45, 200);
-        sb.Draw(white, new Rectangle(x, y, PanelW - 12, EntryH - 2), bg);
-        DrawBorder(sb, white, new Rectangle(x, y, PanelW - 12, EntryH - 2));
+        var w = PanelW - 16;
+        if (selected) sb.Draw(white, new Rectangle(x, y, w, EntryH - 2), new Color(255, 245, 200, 90));
 
-        // Status dot
-        var dotColor = q.Complete ? new Color(80, 220, 80) : new Color(220, 180, 80);
-        sb.Draw(white, new Rectangle(x + 4, y + 4, 8, 8), dotColor);
-
-        // Name
-        _font?.Draw(sb, q.Name, new Vector2(x + 16, y + 3), new Color(255, 230, 120));
-        // Progress value (raw quest record string), truncated to fit
+        // Status dot (gold = in progress, green = complete).
+        sb.Draw(white, new Rectangle(x + 4, y + 5, 8, 8), q.Complete ? new Color(80, 200, 80) : new Color(225, 180, 70));
+        _font?.Draw(sb, q.Name, new Vector2(x + 18, y + 2), new Color(40, 36, 30));
         if (!string.IsNullOrEmpty(q.Progress))
         {
-            var prog = q.Progress.Length > 40 ? q.Progress[..40] + "…" : q.Progress;
-            _font?.Draw(sb, prog, new Vector2(x + 16, y + 20), new Color(190, 190, 190));
+            var prog = q.Progress.Length > 32 ? q.Progress[..32] + "…" : q.Progress;
+            _font?.Draw(sb, prog, new Vector2(x + 18, y + 17), new Color(90, 90, 90));
         }
-        // Quest id (right-aligned)
-        _font?.Draw(sb, $"#{q.Id}", new Vector2(x + PanelW - 56, y + 3), new Color(140, 200, 140));
-        // Resign hint when selected + active
         if (selected && !q.Complete)
-            _font?.Draw(sb, "[Del] resign", new Vector2(x + 16, y + 38), new Color(220, 140, 90));
-    }
-
-    private static void DrawArrow(SpriteBatch sb, Texture2D white, Rectangle r, bool up)
-    {
-        sb.Draw(white, r, new Color(80, 70, 50));
-        // Simple triangle indicator using inner rect
-        var inner = new Rectangle(r.X + 3, up ? r.Y + 4 : r.Y + 2, r.Width - 6, r.Height - 4);
-        sb.Draw(white, inner, up ? new Color(180, 180, 100) : new Color(180, 180, 100));
+            _font?.Draw(sb, "[Del] resign", new Vector2(x + w - 78, y + 17), new Color(190, 90, 60));
     }
 
     public override bool HandleMouseButton(int x, int y, bool down)
     {
         if (!IsVisible) return false;
         if (_btClose?.HandleMouseButton(x, y, down) == true) return true;
+        if (!down) return new Rectangle((int)Position.X, (int)Position.Y, PanelW, PanelH).Contains(x, y);
 
-        var px = (int)Position.X;
-        var py = (int)Position.Y;
+        // Tab switch.
+        for (var i = 0; i < 4; i++)
+            if (new Rectangle((int)Position.X + TabX[i], (int)Position.Y + 25, TabW[i], 22).Contains(x, y))
+            { _tab = i; _scroll = 0; _selected = -1; return true; }
 
-        // Tab click
-        if (down)
+        // Quest row select.
+        var list = CurrentList;
+        for (var i = 0; i < VisibleRows; i++)
         {
-            if (new Rectangle(px + 10, py + 24, 130, 20).Contains(x, y))  { _tab = 0; _scroll = 0; return true; }
-            if (new Rectangle(px + 148, py + 24, 130, 20).Contains(x, y)) { _tab = 1; _scroll = 0; return true; }
-
-            // Scroll arrows
-            var list = CurrentList;
-            if (new Rectangle(px + 138, py + ListBot + 4, 12, 10).Contains(x, y) && _scroll > 0)
-                { _scroll--; return true; }
-            if (new Rectangle(px + 154, py + ListBot + 4, 12, 10).Contains(x, y) && _scroll < Math.Max(0, list.Count - VisibleRows))
-                { _scroll++; return true; }
-
-            // Quest row → select.
-            for (var i = 0; i < VisibleRows; i++)
-            {
-                var idx = i + _scroll;
-                if (idx >= list.Count) break;
-                var rowRect = new Rectangle(px + 6, py + ListTop + i * EntryH, PanelW - 12, EntryH - 2);
-                if (rowRect.Contains(x, y)) { _selected = list[idx].Id; return true; }
-            }
+            var idx = i + _scroll;
+            if (idx >= list.Count) break;
+            var row = new Rectangle((int)Position.X + 8, (int)Position.Y + ListTop + i * EntryH, PanelW - 16, EntryH - 2);
+            if (row.Contains(x, y)) { _selected = list[idx].Id; return true; }
         }
 
-        return new Rectangle(px, py, PanelW, PanelH).Contains(x, y);
+        // Title-strip drag.
+        if (new Rectangle((int)Position.X, (int)Position.Y, PanelW, 22).Contains(x, y))
+        { _dragging = true; _dragOff = new Vector2(x - Position.X, y - Position.Y); return true; }
+
+        return new Rectangle((int)Position.X, (int)Position.Y, PanelW, PanelH).Contains(x, y);
     }
 
     public override bool OnKeyPress(Keys key)
@@ -226,7 +220,6 @@ public sealed class QuestLog : GamePanel
         if (key == Keys.Escape) { IsVisible = false; return true; }
         if (key == Keys.PageUp)   { _scroll = Math.Max(0, _scroll - VisibleRows); return true; }
         if (key == Keys.PageDown) { _scroll = Math.Min(Math.Max(0, CurrentList.Count - VisibleRows), _scroll + VisibleRows); return true; }
-        // Resign the selected in-progress quest.
         if (key == Keys.Delete && _selected >= 0)
         {
             var q = _quests.Find(e => e.Id == _selected);
@@ -236,12 +229,6 @@ public sealed class QuestLog : GamePanel
         return true;
     }
 
-    private static void DrawBorder(SpriteBatch sb, Texture2D white, Rectangle r)
-    {
-        var c = new Color(80, 70, 50);
-        sb.Draw(white, new Rectangle(r.X, r.Y, r.Width, 1), c);
-        sb.Draw(white, new Rectangle(r.X, r.Bottom - 1, r.Width, 1), c);
-        sb.Draw(white, new Rectangle(r.X, r.Y, 1, r.Height), c);
-        sb.Draw(white, new Rectangle(r.Right - 1, r.Y, 1, r.Height), c);
-    }
+    private static WzSprite? Canvas(WzTextureLoader loader, WzProperty? root, string name) =>
+        root?.Get(name) is WzCanvas c ? loader.Load(c) : null;
 }

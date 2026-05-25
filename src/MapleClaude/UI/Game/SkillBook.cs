@@ -8,20 +8,15 @@ using Microsoft.Xna.Framework.Input;
 namespace MapleClaude.UI.Game;
 
 /// <summary>
-/// Skill book panel. Toggle with K.
-/// Shows up to 12 skill rows per tab (5 tabs for job levels).
-/// Each row: icon, skill name, current/max level, SP-up button.
-/// SP counter shown at top. Scroll to see more than 12 skills.
-///
-/// WZ: UIWindow.img/Skill/
-///   backgrnd — panel background
-///   BtClose / BtHyper / BtGuildSkill / BtRide / BtMacro
-///   tab/enabled/N — tab buttons
-///   BtSpUp0..11   — per-row SP buttons
+/// Skill window — the authentic v95 <c>CUISkill</c>, drawn from <c>UIWindow2.img/Skill/main</c>
+/// (layered backgrounds 174×281, "SKILL INVENTORY"). Skills are a scrolling list of 140×35 rows
+/// (the <c>skill0</c>/<c>skill1</c> row sprites) with the icon, name, level and an SP-up button;
+/// 5 job-tier tabs sit at the top. Row geometry is a port of
+/// <c>CUISkill::GetSkillIndexFromPoint</c>: row <c>i</c> spans x∈[10,149], top=93+40·i, 34 tall,
+/// icon at x=13 (32×32). Double-clicking a learned active skill casts it.
 /// </summary>
 public sealed class SkillBook : GamePanel
 {
-    // ── Data model ──────────────────────────────────────────────────────────
     public sealed class SkillEntry
     {
         public int   Id;
@@ -30,39 +25,34 @@ public sealed class SkillBook : GamePanel
         public int   MaxLevel = 20;
         public bool  Passive;
         public int   MpCost;
-        /// <summary>Skill.wz icon canvas (loaded into <see cref="Icon"/> by the panel).</summary>
         public WzCanvas? IconCanvas;
         internal WzSprite? Icon;
-        internal float Cooldown;       // seconds remaining
-        internal float CooldownTotal;  // seconds (for the sweep overlay)
+        internal float Cooldown;
+        internal float CooldownTotal;
     }
 
-    private readonly List<SkillEntry>   _skills     = new();
+    private readonly List<SkillEntry>       _skills = new();
     private readonly List<List<SkillEntry>> _tabs   = new(5);
 
-    // ── UI ──────────────────────────────────────────────────────────────────
-    private readonly WzSprite? _background;
-    private readonly WzSprite? _spBackgrnd;
+    // ── WZ assets (UIWindow2.img/Skill/main) ──────────────────────────────────
+    private readonly WzSprite? _bg, _bg2, _bg3;
+    private readonly WzSprite? _row0, _row1;
+    private readonly WzSprite?[] _tabOn  = new WzSprite?[5];
+    private readonly WzSprite?[] _tabOff = new WzSprite?[5];
     private readonly Button?   _btClose;
-    private readonly Button?[] _tabBtns  = new Button?[5];
-    private readonly Button?[] _spUpBtns = new Button?[12];
+    private readonly Button?[] _spUp = new Button?[VisibleRows];
     private readonly List<Button> _allButtons = new();
 
-    // ── State ────────────────────────────────────────────────────────────────
     private int _activeTab;
-    private int _scrollOffset;
-    private const int Rows = 12;
-    private const int RowH = 32;
+    private int _scroll;
+    private const int VisibleRows = 4;
+    private const int RowTop0 = 93, RowPitch = 40, RowX = 10, RowW = 139, RowH = 34;
+    private const int TabX0 = 10, TabY = 27, TabStride = 31, TabW = 30, TabH = 20;
 
-    // Stats (wired by GameStage)
-    public int SP { get; set; } = 0;
-    public int JobId { get; set; } = 0; // 0 = Beginner
+    public int SP { get; set; }
+    public int JobId { get; set; }
 
-    /// <summary>Fired when the player clicks a row's SP-up button (server-authoritative
-    /// when set — the panel does not increment locally). Arg = skill id.</summary>
     public Action<int>? OnSkillUp { get; set; }
-
-    /// <summary>Fired on double-click of a learned, active skill row. Arg = (skillId, level).</summary>
     public Action<int, int>? OnSkillCast { get; set; }
 
     private double _lastClickTime;
@@ -71,11 +61,8 @@ public sealed class SkillBook : GamePanel
     private readonly BuiltInFont? _font;
     private readonly WzTextureLoader _loader;
 
-    // Panel geometry
-    private const int PanelW = 172;
-    private const int PanelH = 480;
-    private const int ListX  = 6;
-    private const int ListY  = 58;
+    private int PanelW => _bg?.Width ?? 174;
+    private int PanelH => _bg?.Height ?? 281;
 
     public SkillBook(WzTextureLoader loader, WzPackage? ui, BuiltInFont? font)
     {
@@ -84,59 +71,49 @@ public sealed class SkillBook : GamePanel
         IsVisible = false;
         Position = new Vector2(190, 40);
 
-        var skill = ui?.GetItem("UIWindow.img/Skill") as WzProperty;
-        _background = skill?.Get("backgrnd") is WzCanvas bc ? loader.Load(bc) : null;
-        _spBackgrnd = skill?.Get("sp_backgrnd") is WzCanvas sc ? loader.Load(sc) : null;
+        var main = ui?.GetItem("UIWindow2.img/Skill/main") as WzProperty;
+        _bg   = Canvas(main, "backgrnd");
+        _bg2  = Canvas(main, "backgrnd2");
+        _bg3  = Canvas(main, "backgrnd3");
+        _row0 = Canvas(main, "skill0");
+        _row1 = Canvas(main, "skill1");
 
-        _btClose = MakeBtn(loader, skill, "BtClose", () => IsVisible = false);
+        var tabOn  = (main?.Get("Tab") as WzProperty)?.Get("enabled")  as WzProperty;
+        var tabOff = (main?.Get("Tab") as WzProperty)?.Get("disabled") as WzProperty;
+        for (var i = 0; i < 5; i++) { _tabOn[i] = Canvas(tabOn, i.ToString()); _tabOff[i] = Canvas(tabOff, i.ToString()); }
 
-        var tabEnabled = (skill?.Get("Tab") as WzProperty)?.Get("enabled") as WzProperty;
-        for (var i = 0; i < 5; i++)
+        // SP-up buttons (one per visible row) — reuse the legacy +button sprite.
+        var legacy = ui?.GetItem("UIWindow.img/Skill") as WzProperty;
+        for (var i = 0; i < VisibleRows; i++)
         {
-            var idx = i;
-            var tabRoot = tabEnabled?.Get($"{i}") as WzProperty;
-            if (tabRoot != null)
+            var row = i;
+            if ((legacy?.Get($"BtSpUp{i}") ?? legacy?.Get("BtSpUp")) is WzProperty sp)
             {
-                _tabBtns[i] = new Button(loader, tabRoot)
-                {
-                    OnClick = () => { _activeTab = idx; _scrollOffset = 0; },
-                };
-                _allButtons.Add(_tabBtns[i]!);
+                _spUp[i] = new Button(loader, sp) { OnClick = () => LevelUpRow(row) };
+                _allButtons.Add(_spUp[i]!);
             }
         }
 
-        for (var i = 0; i < 12; i++)
+        if (ui?.GetItem("Basic.img/BtClose3") is WzProperty close)
         {
-            var row = i;
-            var spRoot = skill?.Get($"BtSpUp{i}") as WzProperty
-                      ?? skill?.Get("BtSpUp") as WzProperty;
-            if (spRoot != null)
-            {
-                _spUpBtns[i] = new Button(loader, spRoot) { OnClick = () => LevelUpRow(row) };
-                _allButtons.Add(_spUpBtns[i]!);
-            }
+            _btClose = new Button(loader, close) { OnClick = () => IsVisible = false };
+            _allButtons.Add(_btClose);
         }
 
         LoadDefaultSkills();
         RebuildTabs();
-        LayoutButtons();
     }
 
-    // ── Skill data ───────────────────────────────────────────────────────────
-
+    // ── Data ──────────────────────────────────────────────────────────────────
     public void SetSkills(IEnumerable<SkillEntry> skills)
     {
         _skills.Clear();
         _skills.AddRange(skills);
         foreach (var s in _skills)
-        {
             if (s.Icon is null && s.IconCanvas is not null) s.Icon = _loader.Load(s.IconCanvas);
-        }
         RebuildTabs();
     }
 
-    /// <summary>Start a cooldown on a skill (seconds). Blocks re-cast + shows a sweep
-    /// overlay until it elapses. A zero/negative duration is a no-op.</summary>
     public void StartCooldown(int skillId, float seconds)
     {
         if (seconds <= 0) return;
@@ -146,215 +123,153 @@ public sealed class SkillBook : GamePanel
         sk.CooldownTotal = seconds;
     }
 
-    /// <summary>True if the skill is currently cooling down.</summary>
     public bool IsOnCooldown(int skillId) => _skills.Find(s => s.Id == skillId)?.Cooldown > 0;
-
-    /// <summary>Learned level of a skill, or 0 if not in the book / not learned.</summary>
     public int LevelOf(int skillId) => _skills.Find(s => s.Id == skillId)?.Level ?? 0;
 
-    private void LoadDefaultSkills()
+    private void LoadDefaultSkills() => _skills.AddRange(new[]
     {
-        // Beginner default skills
-        _skills.AddRange(new[]
-        {
-            new SkillEntry { Id = 1000000, Name = "Three Snails",  MaxLevel = 3 },
-            new SkillEntry { Id = 1000001, Name = "Recovery",      MaxLevel = 3 },
-            new SkillEntry { Id = 1000002, Name = "Nimble Feet",   MaxLevel = 3 },
-        });
-    }
+        new SkillEntry { Id = 1000, Name = "Three Snails", MaxLevel = 3 },
+        new SkillEntry { Id = 1001, Name = "Recovery",     MaxLevel = 3 },
+        new SkillEntry { Id = 1002, Name = "Nimble Feet",  MaxLevel = 3 },
+    });
 
     private void RebuildTabs()
     {
-        for (var i = 0; i < 5; i++)
-        {
-            if (i < _tabs.Count) _tabs[i] = new List<SkillEntry>();
-            else _tabs.Add(new List<SkillEntry>());
-        }
-        // Tab 0 = beginner / all for now
-        foreach (var s in _skills) _tabs[0].Add(s);
+        for (var i = 0; i < 5; i++) { if (i < _tabs.Count) _tabs[i] = new(); else _tabs.Add(new()); }
+        foreach (var s in _skills) _tabs[0].Add(s);   // single tier for now; job-root tabs are a follow-up
     }
+
+    private List<SkillEntry> ActiveTab() => _activeTab < _tabs.Count ? _tabs[_activeTab] : _tabs[0];
 
     private void LevelUpRow(int rowIndex)
     {
-        if (SP <= 0) return;
-        var tab = _activeTab < _tabs.Count ? _tabs[_activeTab] : _tabs[0];
-        var abs = _scrollOffset + rowIndex;
-        if (abs >= tab.Count) return;
+        var tab = ActiveTab();
+        var abs = _scroll + rowIndex;
+        if (SP <= 0 || abs >= tab.Count) return;
         var sk = tab[abs];
         if (sk.Level >= sk.MaxLevel) return;
-        if (OnSkillUp != null)
-        {
-            // Server-authoritative: request the up; ChangeSkillRecordResult applies it.
-            OnSkillUp(sk.Id);
-        }
-        else
-        {
-            // Offline / demo fallback.
-            sk.Level++;
-            SP--;
-        }
+        if (OnSkillUp != null) OnSkillUp(sk.Id);
+        else { sk.Level++; SP--; }
     }
 
-    // ── Update ───────────────────────────────────────────────────────────────
-
+    // ── Update ──────────────────────────────────────────────────────────────
     public override void Update(GameTime gameTime)
     {
         LayoutButtons();
-        // Tick skill cooldowns.
         var dt = (float)gameTime.ElapsedGameTime.TotalSeconds;
-        foreach (var s in _skills)
+        foreach (var s in _skills) if (s.Cooldown > 0) s.Cooldown = Math.Max(0, s.Cooldown - dt);
+
+        var tab = ActiveTab();
+        var m = Mouse.GetState();
+        for (var i = 0; i < VisibleRows; i++)
         {
-            if (s.Cooldown > 0) s.Cooldown = Math.Max(0, s.Cooldown - dt);
+            if (_spUp[i] is null) continue;
+            var abs = _scroll + i;
+            _spUp[i]!.Enabled = SP > 0 && abs < tab.Count && tab[abs].Level < tab[abs].MaxLevel;
+            _spUp[i]!.Update(m.X, m.Y, m.LeftButton == ButtonState.Pressed);
         }
-        // Enable SP-up buttons only when SP > 0 and skill not maxed
-        var tab   = ActiveTab();
-        for (var i = 0; i < 12; i++)
-        {
-            if (_spUpBtns[i] is null) continue;
-            var abs = _scrollOffset + i;
-            var canUp = SP > 0 && abs < tab.Count && tab[abs].Level < tab[abs].MaxLevel;
-            _spUpBtns[i]!.Enabled = canUp;
-        }
+        _btClose?.Update(m.X, m.Y, m.LeftButton == ButtonState.Pressed);
     }
 
-    // ── Draw ─────────────────────────────────────────────────────────────────
-
+    // ── Draw ────────────────────────────────────────────────────────────────
     public override void Draw(SpriteBatch sb, Texture2D white)
     {
         if (!IsVisible) return;
-
         var px = (int)Position.X;
         var py = (int)Position.Y;
 
-        // Background
-        if (_background != null)
-            _background.Draw(sb, Position + new Vector2(PanelW / 2f, PanelH / 2f));
+        if (_bg != null) { _bg.Draw(sb, Position); _bg2?.Draw(sb, Position); _bg3?.Draw(sb, Position); }
         else
         {
             sb.Draw(white, new Rectangle(px, py, PanelW, PanelH), new Color(12, 12, 22, 235));
-            DrawBorder(sb, white, new Rectangle(px, py, PanelW, PanelH));
+            _font?.Draw(sb, "SKILL INVENTORY", new Vector2(px + 40, py + 5), new Color(220, 200, 150));
         }
 
-        // Title
-        _font?.Draw(sb, "Skills", new Vector2(px + 66, py + 5), new Color(220, 200, 150));
-
-        // SP counter
+        // SP counter (top-right).
         var spStr = $"SP: {SP}";
-        var spSz  = _font?.Measure(spStr) ?? Vector2.Zero;
-        _font?.Draw(sb, spStr, new Vector2(px + PanelW - (int)spSz.X - 4, py + 5),
-            SP > 0 ? new Color(100, 220, 100) : new Color(160, 160, 160));
+        var spW = _font?.Measure(spStr).X ?? 0f;
+        _font?.Draw(sb, spStr, new Vector2(px + PanelW - spW - 22, py + 6),
+            SP > 0 ? new Color(90, 200, 90) : new Color(150, 150, 150));
 
-        // Tab buttons row
+        // Job tabs.
         for (var i = 0; i < 5; i++)
         {
-            var tx = px + 4 + i * 32;
-            var tabRect = new Rectangle(tx, py + 20, 30, 14);
-            sb.Draw(white, tabRect, i == _activeTab ? new Color(50, 50, 80) : new Color(25, 25, 40));
-            _font?.Draw(sb, $"T{i + 1}", new Vector2(tx + 5, py + 22),
-                i == _activeTab ? Color.White : new Color(140, 140, 140));
-            _tabBtns[i]?.Draw(sb);
+            var spr = i == _activeTab ? _tabOn[i] : _tabOff[i];
+            if (spr != null) spr.Draw(sb, Position);
         }
 
-        // Skill rows
+        // Skill rows.
         var tab = ActiveTab();
-        var clip = new Rectangle(px, py + ListY - 2, PanelW, Rows * RowH + 4);
-        for (var i = 0; i < Rows; i++)
+        for (var i = 0; i < VisibleRows; i++)
         {
-            var abs = _scrollOffset + i;
+            var abs = _scroll + i;
             if (abs >= tab.Count) break;
-            DrawSkillRow(sb, white, tab[abs], px, py + ListY + i * RowH, i);
+            DrawRow(sb, white, tab[abs], px, py + RowTop0 + i * RowPitch, i, abs);
         }
 
-        // Scroll indicators
-        if (_scrollOffset > 0)
-            DrawScrollArrow(sb, white, new Rectangle(px + PanelW / 2 - 5, py + ListY - 10, 10, 8), up: true);
-        if (_scrollOffset + Rows < tab.Count)
-            DrawScrollArrow(sb, white, new Rectangle(px + PanelW / 2 - 5, py + ListY + Rows * RowH + 2, 10, 8), up: false);
+        // Scroll hints.
+        if (_scroll > 0)
+            _font?.Draw(sb, "▲", new Vector2(px + PanelW / 2f - 4, py + RowTop0 - 12), new Color(200, 200, 220));
+        if (_scroll + VisibleRows < tab.Count)
+            _font?.Draw(sb, "▼", new Vector2(px + PanelW / 2f - 4, py + RowTop0 + VisibleRows * RowPitch), new Color(200, 200, 220));
 
-        // Close + SP-up buttons
-        _btClose?.Draw(sb);
-        for (var i = 0; i < 12; i++) _spUpBtns[i]?.Draw(sb);
+        foreach (var b in _allButtons) b.Draw(sb);
     }
 
-    private void DrawSkillRow(SpriteBatch sb, Texture2D white,
-        SkillEntry sk, int px, int rowY, int rowIdx)
+    private void DrawRow(SpriteBatch sb, Texture2D white, SkillEntry sk, int px, int rowY, int rowIdx, int abs)
     {
-        // Icon (real Skill.wz icon when available, else a placeholder box)
-        var iconRect = new Rectangle(px + 4, rowY + 4, 24, 24);
-        if (sk.Icon is not null)
-            sb.Draw(sk.Icon.Texture, new Rectangle(iconRect.X, iconRect.Y, 24, 24), Color.White);
-        else
-            sb.Draw(white, iconRect, new Color(40, 40, 60));
-        DrawBorder(sb, white, iconRect, new Color(80, 80, 100));
+        // Zebra row background (skill0 / skill1).
+        var bg = (abs % 2 == 0 ? _row0 : _row1);
+        bg?.Draw(sb, new Vector2(px + RowX, rowY));
 
-        // Cooldown overlay (darken the icon + show remaining seconds).
+        // Icon (real Skill.wz icon, else placeholder).
+        var iconRect = new Rectangle(px + 13, rowY + 3, 32, 32);
+        if (sk.Icon != null)
+            sb.Draw(sk.Icon.Texture, new Rectangle(iconRect.X, iconRect.Y, 32, 32), Color.White);
+        else
+        { sb.Draw(white, iconRect, new Color(40, 40, 60)); DrawBorder(sb, white, iconRect, new Color(80, 80, 100)); }
         if (sk.Cooldown > 0)
         {
             sb.Draw(white, iconRect, new Color(0, 0, 0, 150));
-            _font?.Draw(sb, ((int)Math.Ceiling(sk.Cooldown)).ToString(),
-                new Vector2(iconRect.X + 6, iconRect.Y + 6), new Color(255, 220, 120));
+            _font?.Draw(sb, ((int)Math.Ceiling(sk.Cooldown)).ToString(), new Vector2(iconRect.X + 8, iconRect.Y + 8), new Color(255, 220, 120));
         }
 
-        // Skill name (dimmed for passive skills, which can't be cast)
-        _font?.Draw(sb, sk.Name, new Vector2(px + 32, rowY + 4),
-            sk.Passive ? new Color(150, 150, 170) : Color.White);
+        _font?.Draw(sb, sk.Name, new Vector2(px + 50, rowY + 2), sk.Passive ? new Color(120, 110, 90) : new Color(40, 36, 30));
+        var lv = sk.MpCost > 0 && !sk.Passive ? $"{sk.Level}/{sk.MaxLevel}   {sk.MpCost} MP" : $"{sk.Level}/{sk.MaxLevel}";
+        _font?.Draw(sb, lv, new Vector2(px + 50, rowY + 18), sk.Level >= sk.MaxLevel ? new Color(170, 130, 40) : new Color(70, 110, 70));
 
-        // Level (+ MP cost for active skills)
-        var lvStr = sk.MpCost > 0 && !sk.Passive
-            ? $"{sk.Level}/{sk.MaxLevel}  {sk.MpCost} MP"
-            : $"{sk.Level}/{sk.MaxLevel}";
-        _font?.Draw(sb, lvStr, new Vector2(px + 32, rowY + 16),
-            sk.Level >= sk.MaxLevel ? new Color(200, 180, 80) : new Color(160, 200, 160));
-
-        // SP-up button position
-        if (_spUpBtns[rowIdx] != null)
-            _spUpBtns[rowIdx]!.Position = new Vector2(px + PanelW - 22, rowY + 8);
-    }
-
-    private void DrawScrollArrow(SpriteBatch sb, Texture2D white, Rectangle r, bool up)
-    {
-        sb.Draw(white, r, new Color(80, 80, 100, 180));
-        var tip  = up ? new Vector2(r.X + r.Width / 2f, r.Y)
-                       : new Vector2(r.X + r.Width / 2f, r.Bottom);
-        _font?.Draw(sb, up ? "^" : "v", tip + new Vector2(-4, -2), new Color(180, 180, 200));
+        if (_spUp[rowIdx] != null) _spUp[rowIdx]!.Position = new Vector2(px + PanelW - 26, rowY + 8);
     }
 
     // ── Input ────────────────────────────────────────────────────────────────
-
     public override bool HandleMouseButton(int x, int y, bool down)
     {
         if (!IsVisible) return false;
-        foreach (var b in _allButtons)
-            if (b?.HandleMouseButton(x, y, down) == true) return true;
-        _btClose?.HandleMouseButton(x, y, down);
+        foreach (var b in _allButtons) if (b?.HandleMouseButton(x, y, down) == true) return true;
+        if (!down) return new Rectangle((int)Position.X, (int)Position.Y, PanelW, PanelH).Contains(x, y);
 
-        // Double-click a learned, active skill row → cast it.
-        if (down)
+        // Tab switch.
+        for (var i = 0; i < 5; i++)
+            if (new Rectangle((int)Position.X + TabX0 + i * TabStride, (int)Position.Y + TabY, TabW, TabH).Contains(x, y))
+            { _activeTab = i; _scroll = 0; return true; }
+
+        // Double-click a learned active skill → cast.
+        var tab = ActiveTab();
+        for (var i = 0; i < VisibleRows; i++)
         {
-            var tab = ActiveTab();
-            for (var i = 0; i < Rows; i++)
+            var abs = _scroll + i;
+            if (abs >= tab.Count) break;
+            var rowRect = new Rectangle((int)Position.X + RowX, (int)Position.Y + RowTop0 + i * RowPitch, RowW, RowH);
+            if (!rowRect.Contains(x, y)) continue;
+            var now = Environment.TickCount64 / 1000.0;
+            if (_lastClickRow == abs && now - _lastClickTime < 0.4)
             {
-                var abs = _scrollOffset + i;
-                if (abs >= tab.Count) break;
-                var rowRect = new Rectangle((int)Position.X + ListX, (int)Position.Y + ListY + i * RowH, PanelW - ListX * 2, RowH);
-                if (!rowRect.Contains(x, y)) continue;
-                var now = Environment.TickCount64 / 1000.0;
-                if (_lastClickRow == abs && now - _lastClickTime < 0.4)
-                {
-                    var sk = tab[abs];
-                    if (!sk.Passive && sk.Level > 0 && sk.Cooldown <= 0)
-                    {
-                        OnSkillCast?.Invoke(sk.Id, sk.Level);
-                    }
-                    _lastClickRow = -1;
-                }
-                else
-                {
-                    _lastClickRow = abs;
-                    _lastClickTime = now;
-                }
-                return true;
+                var sk = tab[abs];
+                if (!sk.Passive && sk.Level > 0 && sk.Cooldown <= 0) OnSkillCast?.Invoke(sk.Id, sk.Level);
+                _lastClickRow = -1;
             }
+            else { _lastClickRow = abs; _lastClickTime = now; }
+            return true;
         }
         return new Rectangle((int)Position.X, (int)Position.Y, PanelW, PanelH).Contains(x, y);
     }
@@ -363,33 +278,19 @@ public sealed class SkillBook : GamePanel
     {
         if (!IsVisible) return false;
         if (key == Keys.Escape) { IsVisible = false; return true; }
-        if (key == Keys.PageDown) { _scrollOffset = Math.Min(_scrollOffset + Rows, Math.Max(0, ActiveTab().Count - Rows)); return true; }
-        if (key == Keys.PageUp)   { _scrollOffset = Math.Max(0, _scrollOffset - Rows); return true; }
+        if (key == Keys.PageDown) { _scroll = Math.Min(_scroll + VisibleRows, Math.Max(0, ActiveTab().Count - VisibleRows)); return true; }
+        if (key == Keys.PageUp)   { _scroll = Math.Max(0, _scroll - VisibleRows); return true; }
         return false;
     }
 
     // ── Helpers ──────────────────────────────────────────────────────────────
-
-    private List<SkillEntry> ActiveTab() =>
-        _activeTab < _tabs.Count ? _tabs[_activeTab] : _tabs[0];
-
     private void LayoutButtons()
     {
-        if (_btClose != null)
-            _btClose.Position = Position + new Vector2(PanelW - 18, 4);
+        if (_btClose != null) _btClose.Position = Position + new Vector2(PanelW - 18, 6);
     }
 
-    private Button? MakeBtn(WzTextureLoader loader, WzProperty? root, string name, Action onClick)
-    {
-        var pr = root?.Get(name) as WzProperty;
-        if (pr is null) return null;
-        var b = new Button(loader, pr) { OnClick = onClick };
-        _allButtons.Add(b);
-        return b;
-    }
-
-    private static void DrawBorder(SpriteBatch sb, Texture2D white, Rectangle r)
-        => DrawBorder(sb, white, r, new Color(70, 70, 90));
+    private WzSprite? Canvas(WzProperty? root, string name) =>
+        root?.Get(name) is WzCanvas c ? _loader.Load(c) : null;
 
     private static void DrawBorder(SpriteBatch sb, Texture2D white, Rectangle r, Color c)
     {

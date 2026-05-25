@@ -246,6 +246,21 @@ public sealed class GameStage : Stage
         _equip = new EquipInventory(_loader, _ui, font, iconLoader);
         _item = new ItemInventory(_loader, _ui, font, iconLoader);
         _item.OnItemActivate = OnInventoryItemActivate;
+        // Drag an item to another slot in the same tab → rearrange (server-authoritative).
+        _item.OnMoveItem = (tab, from, to) =>
+        {
+            if (Game.Session.IsConnected)
+                Game.Session.Send(GameSender.ChangeSlotPosition(TabToInvType(tab), (short)from, (short)to, 1));
+        };
+        // Double-click a worn slot in the Equip window → unequip to the first free Equip-tab slot.
+        _equip.OnUnequip = bodyPart =>
+        {
+            if (!Game.Session.IsConnected) return;
+            var free = _item?.FirstFreeSlot(0) ?? -1;
+            if (free <= 0) return;
+            Game.Session.Send(GameSender.ChangeSlotPosition(
+                InventoryType.Equip, (short)-bodyPart, (short)free, 1));
+        };
         // Live-tunable slot-grid origin (drag in MAPLECLAUDE_DEBUG mode) — the one
         // inventory coordinate the WZ tree doesn't carry (the client hardcodes it).
         Game.DebugRegistry.Register(new DebugItem("Inventory", "Slot base",
@@ -257,8 +272,11 @@ public sealed class GameStage : Stage
         _skill = new SkillBook(_loader, _ui, font);
         _skill.OnSkillUp = id => SendIfConnected(GameSender.SkillUp(id));
         _skill.OnSkillCast = CastSkill;
-        _stats = new StatsInfo(_loader, _ui, font);
-        _statDetail = new StatDetailInfo(_loader, _ui, font);
+        // Stat window uses the small crisp 12px font: Game.Font is Tahoma 11*point* (~14.7px), too
+        // large for the dense WZ stat rows (18px pitch) — it made the values oversized and sit low.
+        // basicFont (Tahoma 12px) matches the authentic CUIStat value font height.
+        _stats = new StatsInfo(_loader, _ui, basicFont);
+        _statDetail = new StatDetailInfo(_loader, _ui, basicFont);
         _stats.OnDetailToggled = open =>
         {
             if (_statDetail == null) return;
@@ -347,7 +365,6 @@ public sealed class GameStage : Stage
         _keyConfig.OnBindingsChanged += SaveSettings;
         _keyConfig.OnSaveToServer += SendFuncKeyMapModified;
         _optionMenu.OnSettingsChanged += () => { SaveSettings(); ApplyAudioVolumes(); ApplyResolution(_optionMenu.ResW, _optionMenu.ResH); };
-        _optionMenu.OnResolutionChanged += () => ApplyResolution(_optionMenu.ResW, _optionMenu.ResH);
         _panels.Add(_charInfo);
         _panels.Add(_npcTalk);
         _panels.Add(_shop);
@@ -386,7 +403,12 @@ public sealed class GameStage : Stage
         };
         var gmPp = Game.GraphicsDevice.PresentationParameters;
         _gameMenu.Relayout(gmPp.BackBufferWidth, gmPp.BackBufferHeight);
-        _statusBar.OnSystem = () => _gameMenu!.Open();
+        // ESC opens the legacy CUIGameMenu directly (OnKeyPress). The bottom-bar System button now
+        // opens the MODERN StatusBar2 System pop-up; route its Game/System Option + JoyPad items.
+        _statusBar.OnSystem       = () => _gameMenu!.Open();   // retained (unused by the bar pop-up)
+        _statusBar.OnGameOption   = () => _optionMenu!.IsVisible = true;
+        _statusBar.OnSystemOption = () => _optionMenu!.IsVisible = true;
+        _statusBar.OnJoyPad       = () => _chatBar?.AddLine("JoyPad configuration is not supported.", new Color(200, 200, 120));
         _chatBar!.OnSendChat = OnChatSubmit;
 
         _channelSelect.OnChannelChange = ch =>
@@ -941,9 +963,23 @@ public sealed class GameStage : Stage
             _myName = args.Stat.Name;
             if (_statusBar != null) _statusBar.CharName = _myName;
         }
+        // Seed the stat snapshot from SetField's CharacterStat so the Stat / Character-info windows
+        // show the real name + stats immediately (StatChanged arrives later and never carries the
+        // name — that's why the Stat window's name row was blank). Guild comes from a separate
+        // packet, so preserve any value already learned.
+        var seed = args.Stat;
+        _charStats = new CharStats
+        {
+            Name  = seed.Name, Level = seed.Level, JobId = seed.Job,
+            Str = seed.Str, Dex = seed.Dex, Int = seed.Int, Luk = seed.Luk,
+            Hp = seed.Hp, MaxHp = seed.MaxHp, Mp = seed.Mp, MaxMp = seed.MaxMp,
+            Exp = seed.Exp, AP = seed.Ap, Fame = seed.Pop, Guild = _charStats.Guild,
+        };
+        PushCharStats(_charStats);
         if (args.Look is not null && _player is not null && _charRenderer is not null)
         {
             _player.SetAvatar(_charRenderer, args.Look);
+            _charInfo?.SetAvatar(_charRenderer, args.Look);   // profile shows the real avatar
         }
         // Ask the server for our guild roster once (it isn't pushed on login).
         if (!_guildLoadSent && Game.Session.IsConnected)
@@ -1104,6 +1140,17 @@ public sealed class GameStage : Stage
             _   => (itemId / 1_000_000 == 1 && cat is >= 130 and <= 170) ? 11 : 0, // Weapon
         };
     }
+
+    // ItemInventory tab index → wire InventoryType (inverse of InvTypeToTab).
+    private static InventoryType TabToInvType(int tab) => tab switch
+    {
+        0 => InventoryType.Equip,
+        1 => InventoryType.Consume,
+        2 => InventoryType.Install,
+        3 => InventoryType.Etc,
+        4 => InventoryType.Cash,
+        _ => InventoryType.Equip,
+    };
 
     // 5 item tabs map to ItemInventory tab indices; Equipped(0) goes to the
     // equip panel, not the item grid.
@@ -1376,10 +1423,14 @@ public sealed class GameStage : Stage
 
         if (_physics != null)
         {
+            // Root a grounded melee swing: no walking while the swing animation plays,
+            // otherwise the avatar slides across the ground. Airborne keeps its drift so
+            // jump-attacks still arc; climbing is unaffected.
+            var rooted = _attackCooldown > 0f && _physics.Grounded;
             var input = new PlayerInput
             {
-                Left = _moveLeft,
-                Right = _moveRight,
+                Left = _moveLeft && !rooted,
+                Right = _moveRight && !rooted,
                 Up = _upPressed,
                 Down = _downPressed,
                 JumpPressed = _jumpPressed,
@@ -2023,6 +2074,8 @@ public sealed class GameStage : Stage
             _charInfo.CharName = _myName;
             _charInfo.Level    = stats.Level;
             _charInfo.Job      = JobName(stats.JobId);
+            _charInfo.Fame     = stats.Fame;
+            _charInfo.Guild    = stats.Guild;
         }
         if (_skill != null) _skill.SP = stats.SP;
     }
@@ -2078,6 +2131,7 @@ public sealed class GameStage : Stage
         // completes before re-triggering on a held attack key.
         var swingDuration = _player?.Attack(prone: _physics.Stance == Stance.Prone) ?? 0f;
         _attackCooldown = swingDuration > 0f ? swingDuration : AttackCooldownSeconds;
+        _physics.StopWalking();   // stop the walk on swing start so we don't slide while rooted
         if (_sound?.GetItem("Weapon.img/swordL/Attack") is WzSound swing)
         {
             Game.AudioPlayer.PlayEffect(swing);
