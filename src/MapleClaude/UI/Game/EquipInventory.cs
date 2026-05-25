@@ -226,6 +226,9 @@ public sealed class EquipInventory : GamePanel
                 _font?.Draw(sb, e.Name.Length >= 2 ? e.Name[..2] : e.Name,
                     new Vector2(cell.X + 7, cell.Y + 9), new Color(200, 220, 200));
             }
+            // Cash items show a gold coin in the corner of the worn slot.
+            if (_icons.LoadAttr(e.ItemId) is { Cash: true })
+                ItemTooltip.DrawCashCoin(sb, white, cell.X + 1, cell.Y + Cell - 11);
         }
 
         foreach (var b in _allButtons) b.Draw(sb);

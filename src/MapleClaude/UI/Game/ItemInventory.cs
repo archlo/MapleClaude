@@ -418,6 +418,9 @@ public sealed class ItemInventory : GamePanel
             DrawItemIcon(sb, white, it, cell);
             if (it.Grade is > 0 and < 6 && _quality[it.Grade] != null)
                 DrawAt(sb, _quality[it.Grade], cell + new Vector2(1, 1));
+            // Cash items show a gold coin in the corner of the slot (matches the tooltip indicator).
+            if (_icons?.LoadAttr(it.Id) is { Cash: true })
+                ItemTooltip.DrawCashCoin(sb, white, (int)cell.X + 1, (int)cell.Y + IconBox - 11);
             if (it.Quantity > 1) DrawQuantity(sb, it.Quantity, cell);
         }
 

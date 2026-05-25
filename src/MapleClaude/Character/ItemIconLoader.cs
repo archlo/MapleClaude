@@ -89,6 +89,7 @@ public sealed class ItemIconLoader
                     IncSpeed  = I(info, "incSpeed"), IncJump = I(info, "incJump"),
                     AttackSpeed = I(info, "attackSpeed"),
                     Upgrades  = I(info, "tuc"),
+                    Price     = I(info, "price"),
                     Cash      = I(info, "cash") != 0,
                     Only      = I(info, "only") != 0,
                 };
@@ -187,7 +188,7 @@ public sealed class ItemAttr
     public int  ReqLevel, ReqStr, ReqDex, ReqInt, ReqLuk, ReqFame, ReqJob;
     public int  IncStr, IncDex, IncInt, IncLuk;
     public int  IncPad, IncMad, IncPdd, IncMdd, IncMhp, IncMmp, IncAcc, IncEva, IncSpeed, IncJump;
-    public int  AttackSpeed, Upgrades;
+    public int  AttackSpeed, Upgrades, Price;
     public bool Cash, Only;
 }
 
