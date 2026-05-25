@@ -389,6 +389,234 @@ mob-side physics simulation to synthesise a legitimate `MovePath` + `HackedCode`
 suppressed with a one-shot debug log). Left as a focused, carefully-validated
 follow-up rather than shipped blind.
 
+---
+
+# Authentic UI rebuild (Phases 22–24)
+
+The cosmetic UI from Phase 3.5 was laid out with hand-authored magic-number
+coordinates. These phases replace that with **authentic v95 layout**, extracted
+1:1 from the standard WZ canvases (origins) cross-referenced with the decompiled
+v95 client (the IDB). The workflow: dump the WZ subtree with `tools/wz-ui-dump`
+to capture each canvas's size + origin, resolve the matching `CUI*` class
+coordinates via the `ui-origin-finder` agent / `disasm-lookup` skill (translated
+**values only** — never paths or source), then draw origin-baked at those
+coordinates. Privacy rule holds throughout: no local paths / private names / IDA
+filenames in any committed file.
+
+## Phase 22 — UI-origin tooling + login screens (shipped)
+
+**Scope.** A new `tools/wz-ui-dump` enumerates any WZ UI subtree and reports each
+canvas's `width × height × origin` (`--depth`, `--canvas-only`, and a `--png`
+leaf export). With it, the **world-select** and **character-select** screens were
+relaid out to authentic, map-native v95 coordinates verified against the IDB
+(correct world-button base coords; the full-screen map chrome/promos suppressed).
+
+**Exit criteria.** World/char select match the v95 client's on-map placement; the
+dump tool reports origins used by later phases. **Key files:** `tools/wz-ui-dump/`,
+`Stages/{WorldSelectStage,CharSelectStage}.cs`.
+
+## Phase 23 — In-game HUD authenticity (in progress)
+
+**Scope.** The bottom **StatusBar** rebuilt 1:1 from `StatusBar2.img/mainBar`
+(`CUIStatusBar`) — origin-baked frame, 3-slice HP/MP/EXP gauges with bitmap
+numbers, the full button row, all at the bar reference point `R = (viewW/2,
+viewH-1)`. The **MiniMap** rewritten to the v95 transform `(world + center) >> mag`
+with `Map.wz` per-map canvases + `MapHelper.img/minimap` icons. **KeyConfig**
+rebuilt from `UIWindow2.img/KeyConfig` with a faithful port of
+`CUIKeyConfig::CalcKeyIconPosInfo` (`KeyConfigLayout`), plus `QuickSlotConfig`.
+Supporting: `MiniMapData`, `MiniMapMarkers`, `FieldCrc`, `FuncKeyMapped`.
+
+**Exit criteria.** The HUD status bar, minimap, and key-config window render at
+authentic v95 positions and drive the existing server data. **Key files:**
+`UI/Game/{StatusBar,MiniMap,MiniMapMarkers,KeyConfig,KeyConfigLayout,QuickSlotConfig}.cs`,
+`Map/{MiniMapData,FieldCrc}.cs`.
+
+## Phase 24 — Authentic in-game windows
+
+**Scope.** Every remaining in-game window is currently a hand-made layout that
+loads art from the **legacy, empty `UIWindow.img/<Window>` subtree** and falls
+back to flat rectangles. This phase repoints each to its real
+**`UIWindow2.img/<Window>`** node and draws it origin-baked at IDB coordinates
+(the StatusBar/KeyConfig model), reusing the existing server data-binding
+unchanged. A new `UIWindowFrame` helper standardizes the layered backdrop +
+draggable title + close button shared across the windows. Windows in scope and
+their confirmed WZ nodes: Item (`Item`, incl. `FullBackgrnd` expand), Equip
+(`Equip/character` paperdoll), Stat (`Stat/main` + `detail`), character info
+(`UserInfo/character`), Skill (`Skill/main`), Quest (`Quest` 2-pane
+`list` + `quest_info`), system menu (`UIWindow.img/GameMenu`) + options
+(`SysOpt`/`GameOpt`), the in-game channel-select (`UIWindow2.img/Channel`, 370×168 —
+the world + channel-number grid with `BtChange`/`BtCancel`, driving the
+already-wired `UserTransferChannelRequest`), the community window (`UserList/Main`
+with Friend/Party/Guild/Union/Expedition/BlackList tabs + guild sub-dialogs), the
+Messenger (`Messenger/Max|Min|Min2`), and the HUD chat region (`StatusBar2.img`
+chat canvases — chat is part of the status bar in v95, not a separate `Chat`
+node). Ships as a `phase-24/*` sub-PR family: 24.0 frame + CharInfo pilot,
+24.1 inventory, 24.2 stat, 24.3 skill, 24.4 quest, 24.5 options/system menu +
+channel select, 24.6 community + messenger, 24.7 HUD chat.
+
+**Exit criteria.** Each window opens to its real v95 backdrop with correctly
+positioned tabs/slots/buttons/close at 1024×768, and all existing data flows
+(item ops, AP-up, skill-up, quest resign, chat send, option apply, friend/party/
+guild rosters, messenger) still work. **Key files:**
+`UI/Game/{UIWindowFrame,ItemInventory,EquipInventory,StatsInfo,CharInfo,SkillBook,QuestLog,OptionMenu,UserList,Messenger,ChatBar}.cs`
++ per-window `*Layout.cs`.
+
+**Deferred.** Real item/skill icons (NameService / Item.wz — Phases 12/15);
+the CharInfo avatar paperdoll + ride/pet/collect/wish sub-views; Quest detail
+text (Quest.wz / String.wz); and **server data** for blacklist / alliance
+(Union) / expedition (their UI tabs ship as authentic shells; the opcodes are a
+later phase).
+
+---
+
+# Remaining in-game windows (Phases 25–28)
+
+`UIWindow2.img` holds many more authentic in-game windows beyond the core set in
+Phase 24. These phases rebuild them with the same WZ-origin + IDB workflow. Unlike
+Phase 24 (which reused existing server data-binding), **most of these features have
+no server wiring today** — the only family/trade/maker references in the codebase
+are incidental. Each phase therefore pairs the authentic UI with the matching
+protocol **where upstream Kinoko supports it**; where it doesn't, the window ships
+as an authentic, fully-laid-out **shell** (consistent with the Phase 24 social
+shells). Non-upstream features may be referenced against the local modified Kinoko
+checkout recorded in `CLAUDE.local.md` (never named/pathed in a committed file).
+
+## Phase 25 — Family system
+
+**Scope.** The **Family** window (`UIWindow2.img/Family`, 214×343) — the family
+precept / junior-entry / reputation-buff panel, including the five buff entries the
+WZ ships as `RightIcon/type` strings (move-to-character, summon-character,
+drop-rate, EXP, drop-rate+EXP) plus `BtFamilyPrecept`/`BtJuniorEntry`/`BtTree`/
+`BtSpecial`/`BtOK` and the left/right pager — and the **FamilyTree** window
+(`UIWindow2.img/FamilyTree`, 578×386) — the senior/junior tree with
+`PlateLeader`/`PlateOthers` member plates, `BtJuniorEntry`/`BtBye`, and paging. Both
+open from the character-info window's `BtFamily` button.
+
+**Exit criteria.** Both windows render at authentic v95 coordinates, the reputation
+buff buttons + tree navigation are interactive; family roster wires to the server
+if Kinoko exposes a family handler, else ships as a shell. **Key files:** new
+`UI/Game/{Family,FamilyTree}.cs` (+ `*Layout.cs`), plus `Net` family opcodes if wired.
+
+**Deferred.** Family reputation/buff *server effects* and junior recruitment flow
+if upstream lacks the handlers.
+
+## Phase 26 — Notes, rankings & collections
+
+**Scope.** **Memo** (`UIWindow2.img/Memo` — the note composer `Send` + inbox `Get`
+with `FontTime` timestamps), **Ranking** (`Ranking`, 303×298), **MonsterBook**
+(`MonsterBook`, 475×349 — the monster-card collection: `cardSlot`/`infoPage`,
+`LeftTab`/`RightTab`, `BtSearch`, `fullMark`), **BattleRecord** (`BattleRecord` —
+combat analysis with `Tab` + temp panels), **Title/medal** (`Title` — `main`/`sub`),
+and the paged **Book** reader (`Book`, 478×353, `BtNext`/`BtPrev`).
+
+**Exit criteria.** Each window renders authentically and opens from its entry point;
+content binds to the server where an opcode exists (memo send/receive, monster-card
+records), else shows placeholder content. **Key files:** new
+`UI/Game/{Memo,Ranking,MonsterBook,BattleRecord,TitleWindow}.cs`.
+
+**Deferred.** Live monster-card records, ranking data, and battle-analysis math
+(largely client-side / web in v95) unless an opcode is available.
+
+## Phase 27 — Player trading & shops
+
+**Scope.** The MiniRoom window family: **TradingRoom** (`UIWindow2.img/TradingRoom`,
+526×472 — the two-side trade grid with `BtTrade`/`BtReset`/`BtEnter`/`BtClame` and
+the meso plate), **PersonalShop** (`PersonalShop` — owner/visitor views:
+`main`/`visit`/`blackList`/`saleAdd`/`saleList`), and **EntrustedShop**
+(`EntrustedShop` — the hired-merchant view, `BtArrange`/`BtCoin`). This phase pairs
+the authentic UI with the MiniRoom request/result protocol.
+
+**Exit criteria.** A trade opens between two clients and items/meso move; a personal
+shop opens, lists items, and a visitor can buy — verified against a live channel
+server. **Key files:** new `UI/Game/{TradingRoom,PersonalShop,EntrustedShop}.cs` +
+`Net/{Handlers,Senders}` MiniRoom opcodes.
+
+**Deferred.** Hired-merchant persistence and shop search if upstream is limited;
+larger than a pure-layout phase because the MiniRoom protocol is net-new.
+
+## Phase 28 — Maker, macros & item-utility dialogs
+
+**Scope.** **Maker** (`UIWindow2.img/Maker`, 295×344, 4-layer — the item-maker with
+the recipe `ComboBox` + `GaugeBar` + `BtStart`/`BtCancel`), the skill-**Macro** setup
+wizard (`Macro` — `step0`/`step1`, `popup`, `btOK`/`btCancle`), **Reset** (`Reset` —
+AP/SP reset with `BtUP`/`BtDown`), **Delivery** (`Delivery`, 289×310 — the cash gift
+box: `Keep`/`Send`/`Quick` tabs), **Claim** (`Claim` — notice/report), **EnchantSkill**
+(`EnchantSkill`, 173×182), and the cash item-utility dialogs (`MiracleCube`,
+`GoldHammer`, `KarmaScissors`, `ItemProtector`, `Repair`).
+
+**Exit criteria.** The maker dialog drives a `UserMakerRequest` (where supported),
+skill macros save through the existing key-config/func-key plumbing, and the remaining
+cash dialogs render at authentic coordinates. **Key files:** new
+`UI/Game/{Maker,SkillMacro,Reset,Delivery,Claim}.cs` + the cash dialogs.
+
+**Deferred.** Cash-item server effects (cube/hammer/scissors/protector/repair) that
+depend on a running cash service; these render as authentic shells until wired.
+
+---
+
+# Map & field behavior (Phases 29–30)
+
+These complete the map's data-driven behavior and visuals: the full `info`
+metadata block that governs how a field behaves, and the animated portals that
+were parsed for warp logic (Phase 10) but never drawn.
+
+## Phase 29 — Map `info` metadata (full parse + behavior)
+
+**Scope.** `FieldScene.ParseInfo` currently decodes only a subset (`bgm`,
+`returnMap`, `forcedReturn`, `fieldLimit`, `mapDesc`, `town`,
+`VR{Left,Top,Right,Bottom}`) into `MapInfo`. Extend `MapInfo` to parse **every**
+`...img/info` field and wire the client-relevant behaviors:
+
+- `version` — map-data version (validation / metadata).
+- `cloud` — falling off the bottom returns to `returnMap` instead of dying.
+- `town` — town map (no EXP loss on death; town flag).
+- `mobRate` — spawn-rate multiplier (server-authoritative; parsed for parity/debug).
+- `bgm` — already used (Phase 10).
+- `returnMap` / `forcedReturn` — return-map ids for death / field-limit / cloud fall.
+- `mapDesc` — map description text.
+- `hideMinimap` — hide the minimap on this field.
+- `moveLimit` — movement-limit flags.
+- `mapMark` — the minimap / world-map mark icon (`MapHelper.img/mark/<mapMark>`).
+- `swim` — underwater map → swim physics (buoyant gravity / movement).
+- `fieldLimit` — restriction bitmask (jump / teleport / portal-scroll / minigame / …)
+  gating the matching client actions.
+- `VR{Top,Left,Bottom,Right}` — already used for the camera / movement clamp.
+- `fly` — flying map → free vertical-movement physics.
+- `noMapCmd` — disables the `/map` command.
+- `onFirstUserEnter` / `onUserEnter` — server-side entry scripts (the server fires
+  them via `ScriptMessage`; the client parses the names for completeness/debug).
+
+**Exit criteria.** `MapInfo` exposes every field above; `hideMinimap` hides the
+minimap; `mapMark` drives the mark icon; `swim`/`fly` change player physics; `cloud`
+maps return instead of kill on a bottom fall; `fieldLimit`/`moveLimit` gate the
+relevant actions. **Key files:** `src/MapleClaude/Map/MapInfo.cs` (expand),
+`Map/FieldScene.cs` (`ParseInfo`), `Character/PlayerController.cs` (swim/fly/cloud),
+`UI/Game/MiniMap.cs` (hideMinimap + mapMark).
+
+**Deferred.** Server-authoritative effects (`mobRate` spawn, `onUserEnter` script
+execution) stay server-side; the client only parses/forwards them.
+
+## Phase 30 — Portal rendering
+
+**Scope.** Portals are parsed into `FieldScene._portals` and already drive warp
+logic (Phase 10: walk on + Up → `UserTransferFieldRequest`), but they are **never
+drawn**. Render the animated in-game portal sprites from
+`Map.wz/MapHelper.img/portal/game` (`pv` visible, `ph` hidden, `psh` script-hidden)
+at each portal's position by portal type (`pt`): type 2 (visible) loops `game/pv`;
+hidden / script portals appear on proximity / activation; spawn (`sp`, type 0) and
+invisible (`pi`, type 1) portals draw nothing. Reuse the existing
+`WzTextureLoader.LoadAnimation` + the `FieldScene` animation draw path; place
+origin-based at the portal coordinate in the correct map z-order (behind the
+player). The portal `tn` / `onlyOnce` state and warp logic are unchanged.
+
+**Exit criteria.** On a real map, visible portals animate at their coordinates and
+walking into one still warps; spawn/invisible portals render nothing. **Key files:**
+`src/MapleClaude/Map/{FieldScene,Portal}.cs` (load `game/pv` + a type→graphic map;
+add `DrawPortals` to the render loop), reusing `Render/WzTextureLoader.LoadAnimation`.
+
+**Deferred.** Proximity-revealed hidden portals + script-portal activation states if
+they need server signals; the portal-name tooltip.
+
 ## Conventions across phases
 
 - **Branch per phase**, commit per logical unit (file compiles, test passes,

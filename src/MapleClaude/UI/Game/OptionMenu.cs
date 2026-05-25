@@ -30,6 +30,13 @@ public sealed class OptionMenu : GamePanel
     private bool _miniMapStart = true;
     private bool _snowEffect  = false;
 
+    private static readonly (int W, int H)[] Resolutions =
+    {
+        (800, 600), (1024, 768), (1366, 768), (1600, 900), (1920, 1080), (2560, 1440),
+    };
+    private int _resIndex = 1;        // default 1024×768
+    private int _savedResIndex = 1;
+
     // Saved state for cancel
     private int  _savedBgm, _savedSfx;
     private bool _savedDmg, _savedNames, _savedHp, _savedFps, _savedMm, _savedSnow;
@@ -58,15 +65,31 @@ public sealed class OptionMenu : GamePanel
     /// <summary>SFX volume, 0–100.</summary>
     public int SfxVolume => _sfxVolume;
 
+    /// <summary>Selected in-game resolution.</summary>
+    public int ResW => Resolutions[_resIndex].W;
+    public int ResH => Resolutions[_resIndex].H;
+
     /// <summary>Fired when the user commits changes (OK), so the host can persist
     /// them and apply the new volumes live.</summary>
     public event Action? OnSettingsChanged;
+
+    /// <summary>Fired immediately when the resolution selector changes, so the host applies it live
+    /// (and reverts it on Cancel).</summary>
+    public event Action? OnResolutionChanged;
 
     /// <summary>Apply previously-persisted volumes (clamped to 0–100).</summary>
     public void LoadVolumes(int bgm, int sfx)
     {
         _bgmVolume = Math.Clamp(bgm, 0, 100);
         _sfxVolume = Math.Clamp(sfx, 0, 100);
+    }
+
+    /// <summary>Select the saved in-game resolution (defaults to 1024×768 if unknown).</summary>
+    public void LoadResolution(int w, int h)
+    {
+        for (var i = 0; i < Resolutions.Length; i++)
+            if (Resolutions[i].W == w && Resolutions[i].H == h) { _resIndex = i; _savedResIndex = i; return; }
+        _resIndex = 1; _savedResIndex = 1;
     }
 
     private void Accept()
@@ -85,6 +108,8 @@ public sealed class OptionMenu : GamePanel
         _showFps     = _savedFps;
         _miniMapStart = _savedMm;
         _snowEffect  = _savedSnow;
+        _resIndex    = _savedResIndex;
+        OnResolutionChanged?.Invoke();   // revert any live resolution preview
         IsVisible    = false;
     }
 
@@ -98,6 +123,7 @@ public sealed class OptionMenu : GamePanel
         _savedFps   = _showFps;
         _savedMm    = _miniMapStart;
         _savedSnow  = _snowEffect;
+        _savedResIndex = _resIndex;
     }
 
     public new bool IsVisible
@@ -160,6 +186,7 @@ public sealed class OptionMenu : GamePanel
 
         DrawCheckRow(sb, white, px + 12, y, "Show FPS Counter",       ref _showFps);      y += 24;
         DrawCheckRow(sb, white, px + 12, y, "Show Mini-Map on Start",  ref _miniMapStart); y += 24;
+        DrawResolutionRow(sb, white, px + 12, y); y += 24;
 
         foreach (var b in _allButtons) b.Draw(sb);
     }
@@ -202,6 +229,15 @@ public sealed class OptionMenu : GamePanel
         _font?.Draw(sb, label, new Vector2(x + 18, y), new Color(200, 200, 200));
     }
 
+    private void DrawResolutionRow(SpriteBatch sb, Texture2D white, int x, int y)
+    {
+        _font?.Draw(sb, "Resolution", new Vector2(x, y), new Color(200, 200, 200));
+        var (rw, rh) = Resolutions[_resIndex];
+        _font?.Draw(sb, "<", new Vector2(x + 130, y), new Color(160, 200, 255));
+        _font?.Draw(sb, $"{rw} x {rh}", new Vector2(x + 148, y), new Color(225, 225, 225));
+        _font?.Draw(sb, ">", new Vector2(x + 232, y), new Color(160, 200, 255));
+    }
+
     public override bool HandleMouseButton(int x, int y, bool down)
     {
         if (!IsVisible) return false;
@@ -218,7 +254,7 @@ public sealed class OptionMenu : GamePanel
             TryVolumeClick(x, y, px + 12 + 130, py + 76, ref _sfxVolume);
 
             // Checkboxes — positions match DrawCheckRow calls above
-            var cy = py + 28 + 22 + 26 + 26 + 32 + 22;   // start of Display section checkboxes
+            var cy = py + 28 + 22 + 26 + 32 + 22;   // start of Display checkboxes (matches the Draw y-flow)
             TryCheckboxClick(x, y, px + 12, cy,      ref _showDamage);
             TryCheckboxClick(x, y, px + 12, cy + 24, ref _showNames);
             TryCheckboxClick(x, y, px + 12, cy + 48, ref _showHpBars);
@@ -227,6 +263,7 @@ public sealed class OptionMenu : GamePanel
             var iy = cy + 72 + 32 + 22;  // Interface section
             TryCheckboxClick(x, y, px + 12, iy,      ref _showFps);
             TryCheckboxClick(x, y, px + 12, iy + 24, ref _miniMapStart);
+            TryResolutionClick(x, y, px + 12, iy + 48);
         }
 
         return new Rectangle(px, py, PanelW, PanelH).Contains(x, y);
@@ -248,6 +285,20 @@ public sealed class OptionMenu : GamePanel
     {
         if (new Rectangle(cx, cy + 1, 12, 12).Contains(mx, my))
             value = !value;
+    }
+
+    private void TryResolutionClick(int mx, int my, int x, int y)
+    {
+        if (new Rectangle(x + 126, y - 2, 22, 18).Contains(mx, my))
+        {
+            _resIndex = (_resIndex - 1 + Resolutions.Length) % Resolutions.Length;
+            OnResolutionChanged?.Invoke();
+        }
+        else if (new Rectangle(x + 226, y - 2, 26, 18).Contains(mx, my))
+        {
+            _resIndex = (_resIndex + 1) % Resolutions.Length;
+            OnResolutionChanged?.Invoke();
+        }
     }
 
     public override bool OnKeyPress(Keys key)

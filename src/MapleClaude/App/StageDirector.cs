@@ -23,6 +23,7 @@ public sealed class StageDirector
     public void Replace(Stage next)
     {
         _current?.OnExit();
+        MapleClaude.UI.TextField.ClearActive();   // drop focused fields so they don't leak across stages
         _current = next;
         _current.OnEnter(_game);
     }
@@ -34,6 +35,7 @@ public sealed class StageDirector
     public void Push(Stage next)
     {
         if (_current != null) _stack.Push(_current);
+        MapleClaude.UI.TextField.ClearActive();
         _current = next;
         _current.OnEnter(_game);
     }
@@ -45,6 +47,7 @@ public sealed class StageDirector
     public void Pop()
     {
         _current?.OnExit();
+        MapleClaude.UI.TextField.ClearActive();
         if (_stack.TryPop(out var prev))
         {
             _current = prev;

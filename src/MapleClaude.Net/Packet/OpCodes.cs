@@ -86,6 +86,8 @@ public enum InHeader : short
     PartyRequest = 145,
     GuildRequest = 149,
     FriendRequest = 153,
+    FuncKeyMappedModified = 159,
+    QuickslotKeyMappedModified = 216,
     MobMove = 227,
     MobApplyCtrl = 228,
     NpcMove = 241,

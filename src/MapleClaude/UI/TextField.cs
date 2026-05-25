@@ -95,6 +95,14 @@ public sealed class TextField
     /// <summary>Routes an IME composition update to whichever field is focused.</summary>
     internal static void SetActiveComposition(string composition) => Active?.SetComposition(composition);
 
+    /// <summary>Drops focus from the active field. Called on stage transitions so a dead field's focus
+    /// (e.g. login id/pw) doesn't leak into gameplay and keep the IME Right-Alt toggle armed.</summary>
+    internal static void ClearActive()
+    {
+        var a = Active;
+        if (a != null) a.IsFocused = false;   // the IsFocused setter nulls Active
+    }
+
     public void OnTextInput(char ch)
     {
         if (!IsFocused)

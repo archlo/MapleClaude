@@ -158,10 +158,11 @@ public sealed class NpcLook
     {
         if (_font is null || string.IsNullOrEmpty(Name)) return;
         var sz = _font.Measure(Name);
-        var tagPos = new Vector2(screenPos.X - sz.X / 2f, screenPos.Y - PlaceholderH - 18);
+        // Name plate sits just below the NPC's feet (screenPos is the foot anchor).
+        var tagPos = new Vector2(screenPos.X - sz.X / 2f, screenPos.Y + 4);
         var tagRect = new Rectangle((int)(tagPos.X - 3), (int)(tagPos.Y - 1), (int)sz.X + 6, (int)sz.Y + 2);
-        sb.Draw(white, tagRect, new Color(0, 0, 0, 160));
-        _font.Draw(sb, Name, tagPos, Color.White);
+        sb.Draw(white, tagRect, new Color(64, 64, 64, 150));     // grey, semi-transparent
+        _font.Draw(sb, Name, tagPos, new Color(255, 230, 0));    // yellow
     }
 
     public void SetState(string state)

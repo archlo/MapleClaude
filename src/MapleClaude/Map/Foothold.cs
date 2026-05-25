@@ -22,6 +22,20 @@ public sealed class Foothold
     public bool ForbidFallDown { get; init; }
     public int Force { get; init; }
 
+    /// <summary>Connected-group id (the authentic client's <c>CStaticFoothold::m_lZMass</c>), flood-filled
+    /// along Prev/Next at load by <see cref="FieldScene"/>. Wall collision is gated by it: an airborne
+    /// entity only collides with walls that share its ZMass, so a tall wall on another platform never
+    /// blocks it. (Distinct from the WZ <c>Layer</c> / <c>m_lPage</c>, which is only render z-order.)
+    /// 0 until assigned.</summary>
+    public int ZMass { get; set; }
+
+    /// <summary>A vertical foothold (X1==X2) acts as a wall; a horizontal/sloped one is walkable floor.</summary>
+    public bool IsWall => X1 == X2;
+
+    /// <summary>Leftmost / rightmost world X of the segment (endpoints may be stored in either order).</summary>
+    public int LeftEdgeX => Math.Min(X1, X2);
+    public int RightEdgeX => Math.Max(X1, X2);
+
     /// <summary>Slope this foothold makes (used by physics). Returns 0 for horizontal.</summary>
     public float Slope => X1 == X2 ? 0f : (Y2 - Y1) / (float)(X2 - X1);
 

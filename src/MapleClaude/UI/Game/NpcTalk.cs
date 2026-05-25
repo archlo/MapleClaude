@@ -215,6 +215,8 @@ public sealed class NpcTalk : GamePanel
     public override void Update(GameTime gameTime)
     {
         ApplyLayout();
+        // A hidden dialog must not keep the text-input focus (else Right Alt stays armed for the IME).
+        if (!IsVisible && _inputField.IsFocused) _inputField.IsFocused = false;
         if (_dialogType == DialogType.Quiz && IsVisible && _quizTimerSec > 0)
         {
             _quizTimerSec -= (float)gameTime.ElapsedGameTime.TotalSeconds;

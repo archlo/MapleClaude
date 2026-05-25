@@ -229,6 +229,11 @@ public sealed class CharSelectStage : Stage
         Game.LoginHandlers.OnDeleteCharacterResult += OnDeleteCharacterResult;
         Game.LoginHandlers.OnCheckSpwFailed += OnCheckSpwFailed;
 
+        // Default the highlight to the first character so the screen opens with a
+        // character selected (stat scroll + Select/Delete enabled), as the v95 client does.
+        if (Characters.Count > 0)
+            SelectSlot(0);
+
         _logger.LogInformation(
             "CharSelectStage: world={World} channel={Channel} chars={N}",
             _worldId, _channelId, Characters.Count);
