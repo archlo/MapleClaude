@@ -41,7 +41,9 @@ public sealed class DamageNumber
         public Vector2 WorldPos;
         public float   Age;
         public float   Vy;          // upward velocity (world units/s)
-        public Entry(string t, Color c, Vector2 p) { Text = t; Color = c; WorldPos = p; Vy = -80f; }
+        public Kind    Kind;        // needed by Draw to pick the right damage-skin sprite set
+        public Entry(string t, Color c, Vector2 p, Kind kind)
+        { Text = t; Color = c; WorldPos = p; Vy = -80f; Kind = kind; }
     }
 
     private const float RiseDuration = 0.7f;
@@ -50,8 +52,16 @@ public sealed class DamageNumber
 
     private readonly List<Entry> _entries = new();
     private readonly BuiltInFont? _font;
+    /// <summary>WZ damage-skin sprite digits (Effect.wz/BasicEff.img/NoRed1/NoCri1/NoMiss).
+    /// When loaded, damage / crit / miss numbers render with proper v95 sprite digits;
+    /// otherwise they fall back to the BuiltInFont text rendering.</summary>
+    private readonly DamageDigits? _digits;
 
-    public DamageNumber(BuiltInFont? font) => _font = font;
+    public DamageNumber(BuiltInFont? font, DamageDigits? digits = null)
+    {
+        _font   = font;
+        _digits = digits;
+    }
 
     // ── API ───────────────────────────────────────────────────────────────────
 
@@ -67,7 +77,7 @@ public sealed class DamageNumber
         };
         // Slight random horizontal spread so stacked numbers don't overlap
         var spread = (float)(System.Random.Shared.NextDouble() * 20 - 10);
-        _entries.Add(new Entry(text, KindColors[(int)kind], worldPos + new Vector2(spread, 0)));
+        _entries.Add(new Entry(text, KindColors[(int)kind], worldPos + new Vector2(spread, 0), kind));
     }
 
     public void AddMiss(Vector2 worldPos) => Add(0, worldPos, Kind.DamageMiss);
@@ -91,19 +101,38 @@ public sealed class DamageNumber
     public void Draw(SpriteBatch sb, Texture2D white,
                      Func<Vector2, Vector2> worldToScreen)
     {
-        if (_font is null) return;
         foreach (var e in _entries)
         {
-            var fade = e.Age >= RiseDuration
+            var fade  = e.Age >= RiseDuration
                 ? 1f - (e.Age - RiseDuration) / FadeDuration
                 : 1f;
             var alpha = (byte)(255 * Math.Clamp(fade, 0f, 1f));
             var color = e.Color with { A = alpha };
             var screenPos = worldToScreen(e.WorldPos);
-            var sz        = _font.Measure(e.Text);
-            _font.Draw(sb, e.Text,
-                new Vector2(screenPos.X - sz.X / 2f, screenPos.Y - sz.Y),
-                color);
+
+            // For damage / crit / miss / mob-damage, prefer the v95 WZ damage-skin
+            // sprites — the floating numbers above mobs should look like real Maple
+            // digits, not text. Other kinds (heal / EXP) have no native sprite set
+            // in v95, so they always render as text.
+            var rendered = false;
+            if (_digits is not null)
+            {
+                rendered = e.Kind switch
+                {
+                    Kind.DamageMiss                                        => _digits.DrawMiss(sb, screenPos, alpha),
+                    Kind.DamageCrit                                        => _digits.DrawNumber(sb, e.Text, screenPos, alpha, crit: true),
+                    Kind.DamageNormal or Kind.MobDamage                    => _digits.DrawNumber(sb, e.Text, screenPos, alpha, crit: false),
+                    _                                                       => false,
+                };
+            }
+
+            if (!rendered && _font is not null)
+            {
+                var sz = _font.Measure(e.Text);
+                _font.Draw(sb, e.Text,
+                    new Vector2(screenPos.X - sz.X / 2f, screenPos.Y - sz.Y),
+                    color);
+            }
         }
     }
 }

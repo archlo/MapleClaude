@@ -93,6 +93,20 @@ internal sealed class WzCrypto : IDisposable
         }
     }
 
+    /// <summary>
+    /// XOR a canvas data block in place with the raw WZ keystream (the AES mask only —
+    /// no rolling 0xAA counter, index reset to 0). Used by the chunked/encrypted canvas
+    /// pixel format. A no-op when this is the empty cipher (mask stays all-zero).
+    /// </summary>
+    public void XorKeyStream(Span<byte> data)
+    {
+        EnsureMaskSize(data.Length);
+        for (var i = 0; i < data.Length; i++)
+        {
+            data[i] ^= _mask[i];
+        }
+    }
+
     private void EnsureMaskSize(int size)
     {
         lock (_lock)

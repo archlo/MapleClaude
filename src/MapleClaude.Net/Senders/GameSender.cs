@@ -17,6 +17,17 @@ public static class GameSender
         return OutPacket.Of(InHeader.AliveAck);
     }
 
+    // UserCharacterInfoRequest(109): int update_time, int dwCharacterId, byte bPetInfo.
+    // Sent when double-clicking another player; the server replies with CharacterInfo(61).
+    public static OutPacket UserCharacterInfoRequest(int characterId)
+    {
+        var p = OutPacket.Of(InHeader.UserCharacterInfoRequest);
+        p.WriteInt(0);            // update_time
+        p.WriteInt(characterId);  // dwCharacterId
+        p.WriteByte(0);           // bPetInfo (false)
+        return p;
+    }
+
     // ── Inventory ──────────────────────────────────────────────────────────────
 
     // UserChangeSlotPositionRequest(77): int update_time, byte invType,
@@ -105,6 +116,19 @@ public static class GameSender
         return p;
     }
 
+    // UserEmotion(56): int nEmotion, int nDuration, byte bByItemOption.
+    // No update_time prefix — UserHandler.handleUserEmotion reads int/int/bool directly.
+    // duration = -1 (FuncKey path) means "play the WZ face's own per-frame total";
+    // the server treats the value as opaque and echoes it on the broadcast.
+    public static OutPacket UserEmotion(int emotion, int duration = -1, bool byItemOption = false)
+    {
+        var p = OutPacket.Of(InHeader.UserEmotion);
+        p.WriteInt(emotion);
+        p.WriteInt(duration);
+        p.WriteByte(byItemOption);
+        return p;
+    }
+
     // UserAbilityUpRequest(98): int update_time, int dwFlag (the single Stat flag).
     // Mirrors UserHandler.handleUserAbilityUpRequest.
     public static OutPacket UserAbilityUp(int statType)
@@ -162,7 +186,7 @@ public static class GameSender
         var p = OutPacket.Of(InHeader.UserTransferFieldRequest);
         p.WriteByte(fieldKey);
         p.WriteInt(targetMap);               // dwTargetField
-        p.WriteString(portal);               // sPortal (destination portal name)
+        p.WriteString(portal);               // sPortal (source portal name on current field)
         if (!string.IsNullOrEmpty(portal))
         {
             p.WriteShort(x);                 // GetPos()->x
@@ -188,6 +212,80 @@ public static class GameSender
     public static OutPacket ReturnFromCashShop()
     {
         return OutPacket.Of(InHeader.UserTransferFieldRequest);
+    }
+
+    // ── Mob control ─────────────────────────────────────────────────────────────
+
+    // MobMove(227): the controller (= nearest player) drives each mob's movement.
+    //   int dwMobID; short mobCtrlSn; byte actionMask; byte actionAndDir = (action<<1)|left;
+    //   int targetInfo; int multiTargetCount + (int,int)*n; int randTimeCount + int*n;
+    //   byte bActive/cheat; int hackedCode; int ptTargetX; int ptTargetY; int hackedCodeCRC;
+    //   <MovePath blob>; byte bChasing; byte hasTarget; byte pvcChasing; byte pvcChasingHack;
+    //   int tChaseDuration.
+    // Mirrors kinoko/handler/field/MobHandler.handleMobMove byte-for-byte. The server reads
+    // targetInfo / hackedCode / CRC / ptTarget / tail but does not validate them, so zeros
+    // are safe for basic move actions. The MovePath blob is identical to UserMove's; build
+    // it with MovePathEncoder.Encode. The server replies with MobCtrlAck(288).
+    public static OutPacket MobMove(int mobId, short mobCtrlSn, byte action, bool left,
+                                    byte[] movePathBlob, bool chasing = false)
+    {
+        var p = OutPacket.Of(InHeader.MobMove);
+        p.WriteInt(mobId);                                   // dwMobID
+        p.WriteShort(mobCtrlSn);                             // nMobCtrlSN
+        p.WriteByte(0);                                      // actionMask (no rush/toss)
+        p.WriteByte((byte)((action << 1) | (left ? 1 : 0))); // (nAction << 1) | bLeft
+        p.WriteInt(0);                                       // targetInfo (TARGETINFO union)
+        p.WriteInt(0);                                       // aMultiTargetForBall count
+        p.WriteInt(0);                                       // aRandTimeforAreaAttack count
+        p.WriteByte(0);                                      // bActive | 16*!cheatRand
+        p.WriteInt(0);                                       // HackedCode
+        p.WriteInt(0);                                       // ptTarget.x
+        p.WriteInt(0);                                       // ptTarget.y
+        p.WriteInt(0);                                       // dwHackedCodeCRC
+        p.WriteBytes(movePathBlob);                          // <MovePath>
+        p.WriteByte(chasing ? (byte)1 : (byte)0);            // bChasing
+        p.WriteByte(0);                                      // pTarget != 0
+        p.WriteByte(0);                                      // pvcActive.bChasing
+        p.WriteByte(0);                                      // pvcActive.bChasingHack
+        p.WriteInt(0);                                       // pvcActive.tChaseDuration
+        return p;
+    }
+
+    // ── Combat (mob -> player) ───────────────────────────────────────────────────
+
+    // UserHit(52): the victim reports being hit by a mob. In real Maple mobs never send
+    // attacks themselves; instead the controller client detects the collision and sends
+    // this packet, and the server validates the damage against the mob's MobAttack
+    // template and applies the HP loss / status effects. Mirrors
+    // kinoko/handler/user/HitHandler.handleUserHit field-for-field for the
+    // attackIndex >= 0 (mob-attack) branch:
+    //   int update_time, byte attackIndex, byte magicElemAttr, int damage,
+    //   int templateId, int mobId, byte dir, byte reflect, byte guard,
+    //   byte knockback (1 = no knockback), [reflect block omitted], byte stance.
+    // For a basic body-touch hit attackIndex = 0 (the body-attack index in MobAttack).
+    public static OutPacket UserHit(byte attackIndex, byte magicElemAttr, int damage,
+                                    int templateId, int mobId, byte dir, byte knockback = 1)
+    {
+        var p = OutPacket.Of(InHeader.UserHit);
+        p.WriteInt(0);                       // get_update_time()
+        p.WriteByte(attackIndex);            // nAttackIdx (body = 0; -1 Counter, -2 Obstacle, -3 Stat)
+        p.WriteByte(magicElemAttr);          // nMagicElemAttr
+        p.WriteInt(damage);                  // nDamage
+        p.WriteInt(templateId);              // dwTemplateID
+        p.WriteInt(mobId);                   // MobID
+        p.WriteByte(dir);                    // nDir
+        p.WriteByte(0);                      // nX = 0   (reflect)
+        p.WriteByte(0);                      // bGuard
+        p.WriteByte(knockback);              // (bKnockback != 0) + 1   ->   1 = none, 2 = knockback
+        // reflect block skipped: only sent when knockback > 1 || reflect != 0. Sending the
+        // reflect block when knockback==2 would be authentic to the real client, but
+        // Kinoko's HitHandler enters that block iff `knockback > 1 || reflect != 0` — so
+        // for our basic body-touch case we'd need ALL the reflect fields zeroed. Skipping
+        // the block keeps the wire shorter; the server reads through the `else` path and
+        // never references the reflect/power-guard fields. If knockback validation later
+        // requires the block, expand here.
+        p.WriteByte(0);                      // bStance | (nSkillID_Stance == 33101006 ? 2 : 0)
+        return p;
     }
 
     // ── NPC shop (UserShopRequest 66) ─────────────────────────────────────────────
@@ -375,6 +473,33 @@ public static class GameSender
         return p;
     }
 
+    // OpeningScript(4): byte type, short questId, int npcTemplateId, short x, short y.
+    // Runs the quest's q{id}s start script (the server validates canStartQuest first, then drives the
+    // conversation via ScriptMessage). This is how a *quest* NPC starts a quest — UserSelectNpc only
+    // fires for NPCs that carry a general info/script.
+    public static OutPacket QuestStartScript(short questId, int npcTemplateId, short x, short y)
+    {
+        var p = OutPacket.Of(InHeader.UserQuestRequest);
+        p.WriteByte(4);
+        p.WriteShort(questId);
+        p.WriteInt(npcTemplateId);
+        p.WriteShort(x);
+        p.WriteShort(y);
+        return p;
+    }
+
+    // CompleteScript(5): same shape; runs q{id}e (server validates canCompleteQuest first).
+    public static OutPacket QuestCompleteScript(short questId, int npcTemplateId, short x, short y)
+    {
+        var p = OutPacket.Of(InHeader.UserQuestRequest);
+        p.WriteByte(5);
+        p.WriteShort(questId);
+        p.WriteInt(npcTemplateId);
+        p.WriteShort(x);
+        p.WriteShort(y);
+        return p;
+    }
+
     // ── Guild (GuildRequest 149) ──────────────────────────────────────────────────
     // Mirrors kinoko GuildRequestType (LoadGuild=0, WithdrawGuild=7).
 
@@ -461,6 +586,7 @@ public static class GameSender
         Party  = 1,
         Guild  = 2,
         Alliance = 3,
+        Expedition = 6,   // values 4/5 are couple chat (kinoko ChatGroupType)
     }
 
     // GroupMessage(140): int update_time, byte type, byte count, int[count] memberIds, string text.

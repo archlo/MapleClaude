@@ -31,6 +31,15 @@ public sealed class FieldHandlers
     public event Action<MobDamagedArgs>?        OnMobDamaged;
     /// <summary>int mobId, bool isControl (true = client must send MobMove for this mob).</summary>
     public event Action<int, bool>?             OnMobChangeController;
+    /// <summary>Server reply to a MobMove the controller sent: echoes mobCtrlSn + the mob's
+    /// current MP + a suggested next-skill. Per the v95 IDB the ack is informational —
+    /// the client doesn't gate further moves on it.</summary>
+    public event Action<MobCtrlAckArgs>?        OnMobCtrlAck;
+    /// <summary>Server pushes the mob's current HP as a percentage (0-100) right after the
+    /// controller's attack lands. Sent ONLY to the attacker (server takes a shortcut and
+    /// skips the MobDamaged broadcast back to the hitter); drives the HP bar above hit
+    /// mobs. Per kinoko/packet/field/MobPacket.mobHpIndicator.</summary>
+    public event Action<int, byte>?             OnMobHpIndicator;
 
     // ── NPCs ─────────────────────────────────────────────────────────────────
     public event Action<NpcEnterArgs>?          OnNpcEnter;
@@ -40,6 +49,13 @@ public sealed class FieldHandlers
     public event Action<OtherCharEnterArgs>?    OnUserEnter;
     public event Action<int>?                   OnUserLeave;   // charId
     public event Action<OtherCharMoveArgs>?     OnUserMove;
+    /// <summary>A nearby player (CharId &gt; 0) or the local player (CharId == 0 sentinel for
+    /// the UserEmotionLocal echo) started a face expression. Duration may be -1 (use the
+    /// face's own WZ frame-delay total).</summary>
+    public event Action<UserEmotionArgs>?       OnUserEmotion;
+
+    // ── Character profile (double-click another player) ───────────────────────
+    public event Action<CharacterInfoArgs>?     OnCharacterInfo;
 
     // ── Drops ─────────────────────────────────────────────────────────────────
     public event Action<DropEnterArgs>?         OnDropEnter;
@@ -103,6 +119,7 @@ public sealed class FieldHandlers
 
     // ── Key bindings ──────────────────────────────────────────────────────────
     public event Action<List<FuncKeyEntry>>?    OnFuncKeyMappedInit;
+    public event Action<int[]>?                 OnQuickslotInit;
 
     // ── Foothold ──────────────────────────────────────────────────────────────
     public event Action<List<FootholdEntry>>?   OnFootHoldInfo;
@@ -126,11 +143,15 @@ public sealed class FieldHandlers
         OnMobMove             = null;
         OnMobDamaged          = null;
         OnMobChangeController = null;
+        OnMobCtrlAck          = null;
+        OnMobHpIndicator      = null;
         OnNpcEnter            = null;
         OnNpcLeave            = null;
         OnUserEnter           = null;
         OnUserLeave           = null;
         OnUserMove            = null;
+        OnUserEmotion         = null;
+        OnCharacterInfo       = null;
         OnDropEnter           = null;
         OnDropLeave           = null;
         OnIncExp              = null;
@@ -154,6 +175,7 @@ public sealed class FieldHandlers
         OnTemporaryStatSet    = null;
         OnTemporaryStatReset  = null;
         OnFuncKeyMappedInit   = null;
+        OnQuickslotInit       = null;
         OnFootHoldInfo        = null;
     }
 
@@ -165,14 +187,19 @@ public sealed class FieldHandlers
         router.Register(OutHeader.StatChanged,         (p, s) => HandleStatChanged(p));
         router.Register(OutHeader.MobEnterField,        (p, s) => HandleMobEnter(p));
         router.Register(OutHeader.MobLeaveField,        (p, s) => HandleMobLeave(p));
-        router.Register(OutHeader.MobChangeController,  (p, s) => HandleMobChangeController(p, s));
+        router.Register(OutHeader.MobChangeController,  (p, _) => HandleMobChangeController(p));
         router.Register(OutHeader.MobMove,              (p, s) => HandleMobMove(p));
         router.Register(OutHeader.MobDamaged,           (p, s) => HandleMobDamaged(p));
+        router.Register(OutHeader.MobCtrlAck,           (p, _) => HandleMobCtrlAck(p));
+        router.Register(OutHeader.MobHPIndicator,       (p, _) => HandleMobHpIndicator(p));
         router.Register(OutHeader.NpcEnterField,       (p, s) => HandleNpcEnter(p));
         router.Register(OutHeader.NpcLeaveField,       (p, s) => HandleNpcLeave(p));
         router.Register(OutHeader.UserEnterField,      (p, s) => HandleUserEnter(p));
         router.Register(OutHeader.UserLeaveField,      (p, s) => HandleUserLeave(p));
         router.Register(OutHeader.UserMove,            (p, s) => HandleUserMove(p));
+        router.Register(OutHeader.UserEmotion,         (p, s) => HandleUserEmotion(p));
+        router.Register(OutHeader.UserEmotionLocal,    (p, s) => HandleUserEmotionLocal(p));
+        router.Register(OutHeader.CharacterInfo,       (p, s) => HandleCharacterInfo(p));
         router.Register(OutHeader.DropEnterField,      (p, s) => HandleDropEnter(p));
         router.Register(OutHeader.DropLeaveField,      (p, s) => HandleDropLeave(p));
         router.Register(OutHeader.Message,             (p, s) => HandleMessage(p));
@@ -189,6 +216,7 @@ public sealed class FieldHandlers
         router.Register(OutHeader.TrunkResult,         (p, s) => HandleTrunkResult(p));
         router.Register(OutHeader.Messenger,           (p, s) => HandleMessenger(p));
         router.Register(OutHeader.FuncKeyMappedInit,   (p, s) => HandleFuncKeyMappedInit(p));
+        router.Register(OutHeader.QuickslotMappedInit, (p, s) => HandleQuickslotMappedInit(p));
         router.Register(OutHeader.FootHoldInfo,        (p, s) => HandleFootHoldInfo(p));
         router.Register(OutHeader.ChangeSkillRecordResult, (p, s) => HandleChangeSkillRecord(p));
         router.Register(OutHeader.TemporaryStatSet,    (p, s) => OnTemporaryStatSet?.Invoke());
@@ -363,17 +391,27 @@ public sealed class FieldHandlers
         }
     }
 
-    // CharacterData QUESTRECORD section (in-progress): short count, per
-    // { short questId, string value }.
+    // CharacterData QUESTRECORD then QUESTCOMPLETE sections (these are adjacent in the
+    // DBChar.ALL stream the server sends at field entry — see CharacterData.encodeCharacterData):
+    //   QUESTRECORD  (in-progress): short count, { short questId, string value }
+    //   QUESTCOMPLETE (completed):  short count, { short questId, FileTime(8) }
+    // Quest ids are unsigned shorts (some medal/event ids exceed 32767).
     private static List<QuestRecordArgs> DecodeQuestRecords(InPacket p)
     {
         var quests = new List<QuestRecordArgs>();
-        var count = p.ReadShort();
-        for (var i = 0; i < count; i++)
+        var started = p.ReadShort();
+        for (var i = 0; i < started; i++)
         {
-            var questId = p.ReadShort();
+            int questId = (ushort)p.ReadShort();
             var value = p.ReadString();
             quests.Add(new QuestRecordArgs { QuestId = questId, State = 1, Value = value });
+        }
+        var completed = p.ReadShort();
+        for (var i = 0; i < completed; i++)
+        {
+            int questId = (ushort)p.ReadShort();
+            p.ReadLong();   // completedTime (FileTime) — not displayed
+            quests.Add(new QuestRecordArgs { QuestId = questId, State = 2, Value = string.Empty });
         }
         return quests;
     }
@@ -583,27 +621,19 @@ public sealed class FieldHandlers
         OnMobLeave?.Invoke(mobId);
     }
 
-    private void HandleMobChangeController(InPacket p, ClientSession session)
+    private void HandleMobChangeController(InPacket p)
     {
-        // MobChangeController: byte nCalcDamageIndex, int dwMobID
-        // nCalcDamageIndex 0 = release control, 1|2 = take control
-        var calcDmgIndex = p.ReadByte();
-        var mobId        = p.ReadInt();
-        var isCtrl       = calcDmgIndex != 0;
+        // byte nCalcDamageIndex (0 = release control, 1|2 = take control), int dwMobID.
+        // (When taking control the server also re-sends the full spawn body; we ignore
+        // it — the mob already exists from MobEnterField, and the packet is self-framed.)
+        var isCtrl = p.ReadByte() != 0;
+        var mobId  = p.ReadInt();
         _logger.LogDebug("MobChangeController: mobId={Id} ctrl={Ctrl}", mobId, isCtrl);
         OnMobChangeController?.Invoke(mobId, isCtrl);
-        // If we're given control, ack with MobApplyCtrl (opcode 228).
-        // Per kinoko/handler/field/MobHandler.handleMobApplyCtrl: the server
-        // reads `int dwMobID, int crc` — NOT a byte. Send 0 for crc; the
-        // server only re-checks the controller distance against this packet,
-        // not the crc value.
-        if (isCtrl)
-        {
-            var ack = OutPacket.Of((short)InHeader.MobApplyCtrl);
-            ack.WriteInt(mobId);
-            ack.WriteInt(0);    // dwCliCrc (server reads but doesn't validate)
-            session.Send(ack);
-        }
+        // NOTE: we deliberately do NOT send MobApplyCtrl(228) here. The server assigns the
+        // controller itself; MobApplyCtrl is a client control-CLAIM, which Kinoko logs as
+        // "invalid MobApplyCtrl request" for normal (non-firstAttack/pickUpDrop) mobs. The
+        // controller's real job is MobMove(227) (see the GameStage TODO), not an ack.
     }
 
     private void HandleMobMove(InPacket p)
@@ -639,6 +669,45 @@ public sealed class FieldHandlers
         int hp = -1, maxHp = -1;
         try { hp = p.ReadInt(); maxHp = p.ReadInt(); } catch { }
         OnMobDamaged?.Invoke(new MobDamagedArgs { MobId = mobId, Damage = damage, Hp = hp, MaxHp = maxHp });
+    }
+
+    // ── Mob control ack ──────────────────────────────────────────────────────────
+
+    // MobCtrlAck (288): int mobId, short mobCtrlSn, byte nextAttackPossible, short mp,
+    // byte nSkillCommand, byte nSLV. Sent by the server after every MobMove the
+    // controller emitted — echoes the mobCtrlSn (correlation), syncs the mob's MP, and
+    // suggests the next skill it would like played. Per the v95 IDB the ack is
+    // informational; the client doesn't gate further moves on it.
+    private void HandleMobCtrlAck(InPacket p)
+    {
+        var mobId       = p.ReadInt();
+        var mobCtrlSn   = p.ReadShort();
+        var nextAttack  = p.ReadByte();
+        var mp          = p.ReadShort();
+        var skill       = p.ReadByte();
+        var slv         = p.ReadByte();
+        OnMobCtrlAck?.Invoke(new MobCtrlAckArgs
+        {
+            MobId              = mobId,
+            MobCtrlSn          = mobCtrlSn,
+            NextAttackPossible = nextAttack != 0,
+            Mp                 = mp,
+            NextSkillId        = skill,
+            NextSkillLevel     = slv,
+        });
+    }
+
+    // ── Mob HP indicator (server -> attacker, "I hit this mob") ──────────────────
+
+    // MobHPIndicator (298): int mobId, byte percentage. Sent only to the attacker after
+    // each melee/skill hit (the server skips the MobDamaged broadcast back to the hitter
+    // to save bandwidth). Drives the HP bar above the hit mob locally — see GameStage's
+    // OnMobHpIndicator subscription -> MobLook.SetHpPercent.
+    private void HandleMobHpIndicator(InPacket p)
+    {
+        var mobId = p.ReadInt();
+        var pct   = p.ReadByte();
+        OnMobHpIndicator?.Invoke(mobId, pct);
     }
 
     // ── NPCs ─────────────────────────────────────────────────────────────────
@@ -726,6 +795,82 @@ public sealed class FieldHandlers
             OnUserMove?.Invoke(new OtherCharMoveArgs { CharId = charId, X = x, Y = y });
         }
         catch { }
+    }
+
+    // UserEmotion (OutHeader 219): int charId, int nEmotion, int nDuration, byte bByItemOption.
+    // Mirrors upstream kinoko/packet/user/UserRemote.emotion. Broadcast to every user in the
+    // field except the sender; the listener routes it to the matching OtherCharLook.
+    private void HandleUserEmotion(InPacket p)
+    {
+        var charId    = p.ReadInt();
+        var emotion   = p.ReadInt();
+        var duration  = p.ReadInt();
+        var byItem    = p.ReadBool();
+        OnUserEmotion?.Invoke(new UserEmotionArgs
+        {
+            CharId       = charId,
+            Emotion      = emotion,
+            DurationMs   = duration,
+            ByItemOption = byItem,
+        });
+    }
+
+    // UserEmotionLocal (OutHeader 232): int nEmotion, int nDuration, byte bByItemOption.
+    // Vanilla Kinoko does not emit this in the FuncKey flow (handleUserEmotion only
+    // broadcasts UserRemote.emotion=219, excluding the sender); kept for forked-server
+    // and item-effect paths. CharId=0 is the sentinel for "the local player".
+    private void HandleUserEmotionLocal(InPacket p)
+    {
+        var emotion  = p.ReadInt();
+        var duration = p.ReadInt();
+        var byItem   = p.ReadBool();
+        OnUserEmotion?.Invoke(new UserEmotionArgs
+        {
+            CharId       = 0,
+            Emotion      = emotion,
+            DurationMs   = duration,
+            ByItemOption = byItem,
+        });
+    }
+
+    // ── Character profile ──────────────────────────────────────────────────────
+    // CharacterInfo(61): WvsContext.characterInfo. Carries no avatar look or name —
+    // GameStage reuses the in-field OtherCharLook (keyed by CharId) for those.
+    private void HandleCharacterInfo(InPacket p) => OnCharacterInfo?.Invoke(DecodeCharacterInfo(p));
+
+    /// <summary>Decodes the CharacterInfo(61) body. Static + public so the wire shape is unit-testable.
+    /// Field order mirrors upstream Kinoko <c>WvsContext.characterInfo</c> byte-for-byte through the pet
+    /// loop; the trailing taming-mob / wishlist / medal / chair blocks aren't shown and are left unread
+    /// (each S→C packet is framed independently, so unread tail bytes are harmless).</summary>
+    public static CharacterInfoArgs DecodeCharacterInfo(InPacket p)
+    {
+        var a = new CharacterInfoArgs
+        {
+            CharId   = p.ReadInt(),       // dwCharacterId
+            Level    = p.ReadByte(),      // nLevel
+            Job      = p.ReadShort(),     // nJob
+            Fame     = p.ReadShort(),     // nPOP (signed)
+            Married  = p.ReadByte() != 0, // bIsMarried
+            Guild    = p.ReadString(),    // sCommunity
+            Alliance = p.ReadString(),    // sAlliance
+        };
+        p.ReadByte();                     // bMedalInfo (always 0 in Kinoko)
+
+        // CUIUserInfo::SetMultiPetInfo: one block per active pet, a 0 byte terminates.
+        while (p.ReadByte() != 0)         // bPetActivated
+        {
+            a.Pets.Add(new CharInfoPet
+            {
+                TemplateId  = p.ReadInt(),
+                Name        = p.ReadString(),
+                Level       = p.ReadByte(),
+                Tameness    = p.ReadShort(),
+                Repleteness = p.ReadByte(),
+                PetSkill    = p.ReadShort(),
+                PetWear     = p.ReadInt(),
+            });
+        }
+        return a;
     }
 
     // ── Drops ─────────────────────────────────────────────────────────────────
@@ -1191,6 +1336,17 @@ public sealed class FieldHandlers
         OnFuncKeyMappedInit?.Invoke(entries);
     }
 
+    // QuickslotMappedInit (175): byte useDefault, then QUICKSLOT_KEY_MAP_SIZE (8) ints
+    // (DInput scancodes), written unconditionally by the server.
+    private void HandleQuickslotMappedInit(InPacket p)
+    {
+        p.ReadBool(); // defaults flag; the 8 keys follow regardless
+        if (p.Remaining < 8 * sizeof(int)) return;
+        var keys = new int[8];
+        for (var i = 0; i < 8; i++) keys[i] = p.ReadInt();
+        OnQuickslotInit?.Invoke(keys);
+    }
+
     // ── FootHoldInfo ──────────────────────────────────────────────────────────
 
     private void HandleFootHoldInfo(InPacket p)
@@ -1459,6 +1615,16 @@ public sealed class MobEnterArgs
 public sealed class MobMoveArgs  { public int MobId; public short X, Y; }
 public sealed class MobDamagedArgs { public int MobId, Damage, Hp, MaxHp; }
 
+public sealed class MobCtrlAckArgs
+{
+    public int   MobId;
+    public short MobCtrlSn;
+    public bool  NextAttackPossible;
+    public short Mp;
+    public byte  NextSkillId;
+    public byte  NextSkillLevel;
+}
+
 public sealed class NpcEnterArgs
 {
     public int   ObjId, TemplateId;
@@ -1476,6 +1642,34 @@ public sealed class OtherCharEnterArgs
 }
 
 public sealed class OtherCharMoveArgs { public int CharId; public short X, Y; }
+
+public sealed class UserEmotionArgs
+{
+    /// <summary>The player who triggered the emotion. <c>0</c> is the sentinel for
+    /// <see cref="OutHeader.UserEmotionLocal"/> (the local player).</summary>
+    public int  CharId;
+    /// <summary>Emotion index 0..23 per v95 client <c>s_asEmotionName</c>: 0=default,
+    /// 1=hit, 2=smile, 3=troubled, 4=cry, 5=angry, 6=bewildered, 7=stunned, 8=vomit,
+    /// 9=oops, 10=cheers, 11=chu, 12=wink, 13=pain, 14=glitter, 15=blaze, 16=shine,
+    /// 17=love, 18=despair, 19=hum, 20=bowing, 21=hot, 22=dam, 23=qBlue.</summary>
+    public int  Emotion;
+    /// <summary>Duration in ms; <c>-1</c> means "use the WZ face's own per-frame total".</summary>
+    public int  DurationMs;
+    /// <summary>Whether the emotion was triggered by an item option (cash emotion item).</summary>
+    public bool ByItemOption;
+}
+
+public sealed class CharacterInfoArgs
+{
+    public int    CharId;
+    public byte   Level;
+    public short  Job;
+    public short  Fame;
+    public bool   Married;
+    public string Guild    = string.Empty;
+    public string Alliance = string.Empty;
+    public List<CharInfoPet> Pets = new();
+}
 
 public sealed class DropEnterArgs
 {

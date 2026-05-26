@@ -47,6 +47,13 @@ public sealed class PlayerController
     // ── Input edge-detect ─────────────────────────────────────────────────────
     private bool _prevJump;
 
+    // ── Knockback / hit-stun ──────────────────────────────────────────────────
+    // While _staggerTimer > 0 we drop all movement input so the impulse from
+    // ApplyKnockback actually carries the player; gravity + the existing
+    // FallFreely/ClampToBounds path handle the landing the same way a normal
+    // fall does. Mirrors CUserLocal::SetDamaged's input-lock window.
+    private float _staggerTimer;
+
     public Vector2 Position   { get; set; }
     public Stance  Stance     { get; private set; } = Stance.Stand1;
     public int     Frame      { get; private set; }
@@ -55,6 +62,24 @@ public sealed class PlayerController
     /// <summary>True while standing on a foothold (not airborne / climbing). Used to
     /// root a grounded melee swing so the avatar doesn't slide while attacking.</summary>
     public bool    Grounded   => _grounded;
+
+    /// <summary>True while a knockback impulse is still playing out — movement input is
+    /// locked so the player visibly flies back instead of immediately being overridden by
+    /// WASD. Cleared automatically when the stagger window expires.</summary>
+    public bool    IsStaggered => _staggerTimer > 0f;
+
+    /// <summary>Apply a knockback impulse: overrides the current velocity with (vx, vy),
+    /// goes airborne, then physics carries it. Locks movement input for staggerSec. The
+    /// real v95 client passes raw velocity (no fixed strength constant) via
+    /// CVecCtrl::SetImpactNext — caller picks vx (sign = push direction away from the
+    /// attacker) and vy (negative = upward arc; gravity at <c>2000 px/s²</c> brings the
+    /// player back down).</summary>
+    public void ApplyKnockback(float vx, float vy, float staggerSec = 0.40f)
+    {
+        _velocity     = new Vector2(vx, vy);
+        _grounded     = false;
+        _staggerTimer = staggerSec;
+    }
 
     /// <summary>Zero horizontal velocity (grounded only) so a melee swing stops the walk
     /// instantly instead of decelerating into a visible slide. No-op airborne / climbing
@@ -79,6 +104,16 @@ public sealed class PlayerController
     public void Update(PlayerInput input, float dt)
     {
         _wasGrounded = _grounded;
+
+        // Stagger countdown (knockback recovery): while > 0 we ignore ALL movement input
+        // so the impulse from ApplyKnockback carries the player away from the attacker
+        // instead of being overridden by held keys / jump. Ladder/rope ticks below check
+        // their own gates, so this just zeroes the input mask uniformly.
+        if (_staggerTimer > 0f)
+        {
+            _staggerTimer = Math.Max(0f, _staggerTimer - dt);
+            input = default;
+        }
 
         // Ladder/rope climbing owns movement while attached; grabbing one also skips normal movement.
         if (_climb is not null)

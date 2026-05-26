@@ -182,6 +182,91 @@ public sealed class BuiltInFont : IDisposable
         return new Vector2(w, LineHeight);
     }
 
+    /// <summary>If <paramref name="text"/> exceeds <paramref name="maxWidth"/>, trim runes from the
+    /// end and append <paramref name="ellipsis"/> until it fits. Used for the single-line quest-row
+    /// names and the detail-panel header.</summary>
+    public string TruncateToWidth(string text, float maxWidth, string ellipsis = "…")
+    {
+        if (string.IsNullOrEmpty(text) || maxWidth <= 0) return text ?? string.Empty;
+        if (Measure(text).X <= maxWidth) return text;
+        var ellW = Measure(ellipsis).X;
+        if (ellW > maxWidth) return string.Empty;
+        var runes = text.EnumerateRunes().ToList();
+        var widths = runes.Select(r => GetGlyph(r.Value).Width).ToList();
+        var cum = 0f;
+        var end = 0;
+        while (end < runes.Count && cum + widths[end] + ellW <= maxWidth)
+        {
+            cum += widths[end];
+            end++;
+        }
+        if (end == 0) return ellipsis;
+        var sb = new System.Text.StringBuilder();
+        for (var i = 0; i < end; i++) sb.Append(runes[i].ToString());
+        sb.Append(ellipsis);
+        return sb.ToString();
+    }
+
+    /// <summary>Greedy word-wrap on whitespace + explicit '\n'. Returns the wrapped lines.
+    /// Words longer than <paramref name="maxWidth"/> are split mid-rune so they don't overflow.</summary>
+    public IReadOnlyList<string> WrapToWidth(string text, float maxWidth)
+    {
+        var lines = new List<string>();
+        if (string.IsNullOrEmpty(text) || maxWidth <= 0) return lines;
+        foreach (var paragraph in text.Split('\n'))
+        {
+            var line = new System.Text.StringBuilder();
+            var lineW = 0f;
+            foreach (var word in SplitWords(paragraph))
+            {
+                var ww = Measure(word).X;
+                if (lineW == 0 && ww > maxWidth)
+                {
+                    // Hard-break a single word wider than the column.
+                    var buf = new System.Text.StringBuilder();
+                    var bufW = 0f;
+                    foreach (var rune in word.EnumerateRunes())
+                    {
+                        var gw = GetGlyph(rune.Value).Width;
+                        if (bufW + gw > maxWidth && buf.Length > 0)
+                        {
+                            lines.Add(buf.ToString());
+                            buf.Clear();
+                            bufW = 0f;
+                        }
+                        buf.Append(rune.ToString());
+                        bufW += gw;
+                    }
+                    if (buf.Length > 0) { line.Append(buf); lineW = bufW; }
+                    continue;
+                }
+                if (lineW + ww > maxWidth && line.Length > 0)
+                {
+                    lines.Add(line.ToString().TrimEnd());
+                    line.Clear();
+                    lineW = 0f;
+                    if (word.Length > 0 && char.IsWhiteSpace(word[0])) continue;  // drop leading space on wrap
+                }
+                line.Append(word);
+                lineW += ww;
+            }
+            lines.Add(line.ToString().TrimEnd());
+        }
+        return lines;
+    }
+
+    private static IEnumerable<string> SplitWords(string paragraph)
+    {
+        var i = 0;
+        while (i < paragraph.Length)
+        {
+            var start = i;
+            var ws = char.IsWhiteSpace(paragraph[i]);
+            while (i < paragraph.Length && char.IsWhiteSpace(paragraph[i]) == ws) i++;
+            yield return paragraph[start..i];
+        }
+    }
+
     public void Draw(SpriteBatch sb, string s, Vector2 pos, Color color)
     {
         if (string.IsNullOrEmpty(s))

@@ -27,7 +27,11 @@ public sealed class WzUol
     /// Resolves the UOL target to a property value. Returns <c>null</c> if the
     /// target doesn't exist. Idempotent and cached after the first call. Handles
     /// relative <c>../</c> targets (e.g. a head canvas linking to
-    /// <c>../../front/head</c>) by walking the parent-property chain.
+    /// <c>../../front/head</c>) by walking the parent-property chain, and follows
+    /// UOL <em>chains</em> — a link whose target is itself a link — to the final
+    /// non-UOL value. (Non-zero skins do exactly this: a per-action head node links
+    /// to the skin's shared head, which is itself a link to the canvas; without
+    /// chain-following the avatar's head/face/hair would fail to resolve.)
     /// </summary>
     public object? Resolve()
     {
@@ -36,7 +40,15 @@ public sealed class WzUol
             return _resolved;
         }
         _resolveAttempted = true;
-        _resolved = ResolveTarget(Target);
+        var result = ResolveTarget(Target);
+        // Follow the chain to the final non-UOL target. The hop cap plus each link's
+        // own _resolveAttempted guard make a cyclic chain resolve to null instead of
+        // looping forever.
+        for (var hops = 0; result is WzUol next && hops < 16; hops++)
+        {
+            result = next.Resolve();
+        }
+        _resolved = result;
         return _resolved;
     }
 

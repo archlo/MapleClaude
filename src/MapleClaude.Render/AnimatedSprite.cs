@@ -21,9 +21,14 @@ public sealed class AnimatedSprite
         ArgumentOutOfRangeException.ThrowIfZero(frames.Length);
         _frames = frames;
         _delaysMs = delaysMs;
+        var total = 0;
+        foreach (var d in delaysMs) total += d > 0 ? d : 100;
+        TotalDurationMs = total;
     }
 
     public int FrameCount => _frames.Length;
+    /// <summary>Sum of all frame delays (one full cycle), in milliseconds.</summary>
+    public int TotalDurationMs { get; }
     public WzSprite Current => _frames[_index];
     public Vector2 Origin => Current.Origin;
     public int Width => Current.Width;

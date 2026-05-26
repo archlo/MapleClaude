@@ -90,6 +90,11 @@ public sealed class EquipInventory : GamePanel
     /// the closed-hand grab cursor and to route the drop click (→ unequip when dropped on the inventory).</summary>
     public bool IsDragging => _dragActive && IsVisible;
 
+    /// <summary>True while the cursor is hovering an occupied equip slot and nothing is grabbed —
+    /// GameStage uses this to flip the cursor to the open-hand variant 5 ("ready to grab").</summary>
+    public bool HoverOverItem => IsVisible && !_dragActive && _tooltipPart >= 0
+                                 && _equipped.ContainsKey(_tooltipPart);
+
     /// <summary>Raised when a worn slot is unequipped — the body part (CUIEquip::OnMouseButton →
     /// CDraggableItem::GetOffEquipItem). Fired by a fast double-click or a ghost-drag onto the inventory.</summary>
     public Action<int>? OnUnequip { get; set; }
@@ -102,7 +107,11 @@ public sealed class EquipInventory : GamePanel
     {
         _font  = font;
         _icons = icons;
-        if (font != null) _tooltip = new ItemTooltip(tipFont ?? font, icons, itemDesc, tipTabFont);
+        if (font != null)
+        {
+            var tipAssets = new TooltipAssets(loader, ui);
+            _tooltip = new ItemTooltip(tipFont ?? font, icons, tipAssets, itemDesc, tipTabFont);
+        }
         IsVisible = false;
         Position  = new Vector2(560, 60);
 

@@ -165,7 +165,11 @@ public sealed class ItemInventory : GamePanel
         if (ui?.GetItem("Basic.img/BtClose3") is WzProperty closeRoot)
             _btClose = new Button(_loader, closeRoot) { OnClick = () => IsVisible = false };
 
-        if (font != null && icons != null) _tooltip = new ItemTooltip(tipFont ?? font, icons, itemDesc, tipTabFont);
+        if (font != null && icons != null)
+        {
+            var tipAssets = new TooltipAssets(loader, ui);
+            _tooltip = new ItemTooltip(tipFont ?? font, icons, tipAssets, itemDesc, tipTabFont);
+        }
 
         LayoutButtons();
     }
@@ -542,6 +546,11 @@ public sealed class ItemInventory : GamePanel
     /// reads this to switch the cursor to the closed-hand "grab" sprite. Gated on visibility so hiding
     /// the window mid-drag can't leave the cursor stuck as a grab hand (the item never left its slot).</summary>
     public bool IsDragging => _dragActive && IsVisible;
+
+    /// <summary>True while the cursor is hovering an occupied slot and nothing is grabbed yet —
+    /// GameStage uses this to flip the cursor to the open-hand variant 5 ("ready to grab"). Gated
+    /// on visibility so a hover state can't outlive the window.</summary>
+    public bool HoverOverItem => IsVisible && !_dragActive && _hoverItem is not null;
 
     /// <summary>True when the point is inside this (visible) window — used to detect an equip dropped
     /// here to unequip it.</summary>

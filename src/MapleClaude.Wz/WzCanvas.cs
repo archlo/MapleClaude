@@ -56,7 +56,7 @@ public sealed class WzCanvas
 
         var buf = _parent.GetBuffer(_dataStartOffset);
         var compressed = buf.ReadBytes(_dataLength);
-        var raw = ZlibInflate(compressed);
+        var raw = InflateCanvas(compressed, _parent.Crypto);
         _decodedBgra = ConvertToBgra(raw, _width, _height, _format, _formatScale);
         return _decodedBgra;
     }
@@ -192,10 +192,64 @@ public sealed class WzCanvas
         }
     }
 
+    // GMS v95 canvas pixel data is either a plain zlib stream (starts with a 0x78
+    // header — what most UI canvases use) or the chunked/encrypted form: a sequence of
+    // [int blockLen][blockLen bytes XOR'd with the WZ key] concatenated into the zlib
+    // stream. Mob (and various other) canvases use the chunked form; decoding only the
+    // plain form is what threw "unsupported compression method".
+    private static byte[] InflateCanvas(byte[] compressed, WzCrypto crypto)
+    {
+        if (HasZlibHeader(compressed))
+        {
+            return ZlibInflate(compressed);
+        }
+        var dechunked = Dechunk(compressed, crypto);
+        try
+        {
+            return ZlibInflate(dechunked);
+        }
+        catch (InvalidDataException)
+        {
+            return RawInflate(dechunked); // dechunked payload was raw DEFLATE (no zlib header)
+        }
+    }
+
+    private static bool HasZlibHeader(byte[] d) =>
+        d.Length >= 2 && d[0] == 0x78 && d[1] is 0x01 or 0x5E or 0x9C or 0xDA;
+
+    private static byte[] Dechunk(byte[] data, WzCrypto crypto)
+    {
+        using var dst = new MemoryStream(data.Length);
+        var pos = 0;
+        while (pos + 4 <= data.Length)
+        {
+            var blockLen = BitConverter.ToInt32(data, pos);
+            pos += 4;
+            if (blockLen <= 0 || pos + blockLen > data.Length)
+            {
+                break;
+            }
+            var block = data.AsSpan(pos, blockLen).ToArray();
+            crypto.XorKeyStream(block);
+            dst.Write(block, 0, blockLen);
+            pos += blockLen;
+        }
+        return dst.ToArray();
+    }
+
     private static byte[] ZlibInflate(byte[] compressed)
     {
         using var src = new MemoryStream(compressed);
         using var inflater = new ZLibStream(src, CompressionMode.Decompress);
+        using var dst = new MemoryStream();
+        inflater.CopyTo(dst);
+        return dst.ToArray();
+    }
+
+    private static byte[] RawInflate(byte[] compressed)
+    {
+        using var src = new MemoryStream(compressed);
+        using var inflater = new DeflateStream(src, CompressionMode.Decompress);
         using var dst = new MemoryStream();
         inflater.CopyTo(dst);
         return dst.ToArray();

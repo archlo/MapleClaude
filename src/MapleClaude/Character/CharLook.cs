@@ -41,8 +41,22 @@ public sealed class CharLook
     private bool _climbing;                    // current movement stance is ladder/rope
     private bool _climbMoving;                 // climbing AND actually moving (else freeze)
 
+    // Face emotion (the F1..F7 expressions). 0 = open-eye / blink default; 1..23 =
+    // an active emotion playing its own per-frame WZ delays. Driven by SetEmotion
+    // (local trigger or server broadcast) and advanced inside AdvanceEmotion each
+    // tick; reverts to 0 when the duration elapses (matches CAvatar::Update).
+    private int   _emotion;
+    private int   _emotionFrame;
+    private float _emotionFrameTimer;
+    private float _emotionEndsInMs;
+
     public bool FacingLeft => _facingLeft;
     public bool IsAttacking => _attackAction is not null;
+
+    /// <summary>Current emotion id (0 = none/default). Read by the renderer at draw time.</summary>
+    public int EmotionId => _emotion;
+    /// <summary>Current frame index inside the active emotion's WZ frame list.</summary>
+    public int EmotionFrame => _emotionFrame;
 
     // The action currently drawn: a live attack overrides the movement stance.
     private string CurrentAction => _attackAction ?? _moveAction;
@@ -103,6 +117,7 @@ public sealed class CharLook
         _climbing = stance is Stance.Ladder or Stance.Rope;
         _climbMoving = climbMoving;
         AdvanceAnim(dt);
+        AdvanceEmotion(dt);
     }
 
     /// <summary>Self-driven demo physics for the pre-SetField title path.</summary>
@@ -127,6 +142,55 @@ public sealed class CharLook
         SetMoveAction(!_onGround ? "jump" : vx != 0 ? "walk1" : "stand1");
         _climbing = false;
         AdvanceAnim(dt);
+        AdvanceEmotion(dt);
+    }
+
+    /// <summary>Start (or revert) a face emotion. <paramref name="emotion"/>=0 cancels
+    /// the current emotion and goes back to default/blink. <paramref name="durationMs"/>=-1
+    /// means "use the WZ face's own per-frame total" — matches the v95 client's
+    /// <c>CAvatar::PrepareFaceLayer</c> when called from the FuncKey path. Out-of-range
+    /// emotions are clamped to 0..23.</summary>
+    public void SetEmotion(int emotion, int durationMs)
+    {
+        _emotion = Math.Clamp(emotion, 0, 23);
+        _emotionFrame = 0;
+        _emotionFrameTimer = 0f;
+        if (_emotion == 0) { _emotionEndsInMs = 0f; return; }
+        if (durationMs < 0)
+        {
+            durationMs = _renderer is not null && _look is not null
+                ? _renderer.EmotionDurationMs(_look.Face, _emotion)
+                : 0;
+        }
+        _emotionEndsInMs = Math.Max(0, durationMs);
+    }
+
+    // Advance the active emotion's frame clock. Frames use their own per-frame
+    // WZ delays (independent of the body action); the emotion reverts to default
+    // when the total duration elapses.
+    private void AdvanceEmotion(float dt)
+    {
+        if (_emotion == 0) return;
+        var ms = dt * 1000f;
+        _emotionEndsInMs -= ms;
+        if (_emotionEndsInMs <= 0)
+        {
+            SetEmotion(0, 0);
+            return;
+        }
+        if (_renderer is null || _look is null) return;
+        var delays = _renderer.EmotionFrameDelays(_look.Face, _emotion);
+        if (delays.Length == 0) return;
+        _emotionFrameTimer += ms;
+        for (var guard = 0; guard < 16; guard++)
+        {
+            var d = delays[Math.Min(_emotionFrame, delays.Length - 1)];
+            if (d <= 0) d = 100;
+            if (_emotionFrameTimer < d) break;
+            _emotionFrameTimer -= d;
+            _emotionFrame = (_emotionFrame + 1) % delays.Length;
+            if (delays.Length == 1) break;
+        }
     }
 
     /// <summary>Start a one-shot basic-attack animation for the equipped weapon
@@ -137,6 +201,23 @@ public sealed class CharLook
     {
         if (_renderer is null || _look is null || _climbing) return 0f;
         var action = _renderer.PickAttackAction(_look, prone);
+        var delays = GetFrames(action).Delays;
+        if (delays.Length == 0) return 0f;
+
+        _attackAction = action;
+        _frame = 0;
+        _elapsedMs = 0f;
+        var total = 0;
+        foreach (var d in delays) total += d;
+        return total / 1000f;
+    }
+
+    /// <summary>Play a specific one-shot action (e.g. a skill's body action) once,
+    /// reverting to the movement stance when it ends. Returns the duration in seconds,
+    /// or 0 when the action has no frames (caller may fall back to a normal attack).</summary>
+    public float PlayAction(string action)
+    {
+        if (_renderer is null || _look is null || _climbing || string.IsNullOrEmpty(action)) return 0f;
         var delays = GetFrames(action).Delays;
         if (delays.Length == 0) return 0f;
 
@@ -201,7 +282,8 @@ public sealed class CharLook
         // Full composed avatar when a look + renderer are attached.
         if (_renderer is not null && _look is not null)
         {
-            _renderer.Draw(sb, _look, stat: null, action, _frame, screenPos, _facingLeft);
+            _renderer.Draw(sb, _look, stat: null, action, _frame, screenPos, _facingLeft,
+                emotionId: _emotion, emotionFrame: _emotionFrame);
             return;
         }
 

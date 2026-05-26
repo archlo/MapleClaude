@@ -55,6 +55,12 @@ public sealed class WzTextureLoader : IDisposable
             // calling Stage can substitute a placeholder.
             return null;
         }
+        catch (InvalidDataException)
+        {
+            // Pixel data we couldn't inflate — degrade to a placeholder rather than
+            // throwing out of a packet handler (this was the opcode-284 mob crash).
+            return null;
+        }
 
         var texture = new Texture2D(_device, canvas.Width, canvas.Height, mipmap: false, SurfaceFormat.Color);
         texture.SetData(pixels.ToArray());

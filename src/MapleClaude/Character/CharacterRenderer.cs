@@ -46,6 +46,25 @@ public sealed class CharacterRenderer
         _zmap = new AvatarZMap(baseWz, logger);
     }
 
+    /// <summary>v95 face emotion subnode names, indexed by emotion id. Matches the v95
+    /// client's <c>s_asEmotionName</c> table exactly. Index 0 is the open-eye default
+    /// (and the blink path); ids 1..23 are the named expressions. F1..F7 default
+    /// bindings map nID 100..106 → emotion 1..7 (<c>hit</c>..<c>stunned</c>).</summary>
+    private static readonly string[] EmotionNames =
+    {
+        "default", "hit", "smile", "troubled", "cry", "angry", "bewildered", "stunned",
+        "vomit", "oops", "cheers", "chu", "wink", "pain", "glitter", "blaze", "shine",
+        "love", "despair", "hum", "bowing", "hot", "dam", "qBlue",
+    };
+
+    /// <summary>The WZ subnode name for an emotion id, falling back to <c>default</c>
+    /// for ids outside 0..23.</summary>
+    public static string EmotionName(int id) =>
+        (uint)id < EmotionNames.Length ? EmotionNames[id] : "default";
+
+    // Per-face per-emotion frame-delay cache, mirroring the shape of _blinkDelaysByFace.
+    private readonly Dictionary<(int face, int emotion), int[]> _emotionDelaysByFace = new();
+
     /// <summary>Whether the look's weapon uses the two-handed (stand2/walk2) stances. The v95
     /// client doesn't derive this from the weapon TYPE — it reads the weapon's WZ <c>info/walk</c>
     /// int (CActionMan::GetCharacterImgEntry / CAvatar::MoveAction2RawAction): <c>walk != 1</c> ⇒
@@ -146,14 +165,18 @@ public sealed class CharacterRenderer
         Stance stance,
         int frame,
         Vector2 position,
-        bool facingLeft) =>
-        Draw(sb, look, stat, stance.ToWzKey(), frame, position, facingLeft);
+        bool facingLeft,
+        int emotionId = 0,
+        int emotionFrame = 0) =>
+        Draw(sb, look, stat, stance.ToWzKey(), frame, position, facingLeft, emotionId, emotionFrame);
 
     /// <summary>
     /// Draw the avatar with its body pen at <paramref name="position"/> (the body's
     /// origin point), in the WZ action keyed by <paramref name="actionKey"/> (a
     /// movement stance such as <c>walk1</c>/<c>ladder</c> or an attack action such
     /// as <c>swingO1</c>). Parts are stitched relative to the body via their anchor maps.
+    /// <paramref name="emotionId"/> &gt; 0 overrides the open-eye / blink face with the
+    /// matching <c>Face/000XXXXXX.img/&lt;emotionName&gt;/&lt;emotionFrame&gt;</c> node.
     /// </summary>
     public void Draw(
         SpriteBatch sb,
@@ -162,7 +185,9 @@ public sealed class CharacterRenderer
         string actionKey,
         int frame,
         Vector2 position,
-        bool facingLeft)
+        bool facingLeft,
+        int emotionId = 0,
+        int emotionFrame = 0)
     {
         _ = stat;
         if (_characterWz is null) return;
@@ -183,7 +208,7 @@ public sealed class CharacterRenderer
         var armOverHair = LoadPart($"{bodyImg}/{st}/{frame}/armOverHair");
         var hand = LoadPart($"{bodyImg}/{st}/{frame}/hand");
         var head = LoadPart($"{headImg}/{st}/{frame}/head");
-        var face = LoadFace(look.Face);
+        var face = LoadFace(look.Face, emotionId, emotionFrame);
         // Hair: front layers normally; on a ladder/rope (back-facing) use the dedicated back-of-head
         // frames backHairBelowCap (behind the head) + backHair (over it), keyed by the climb stance+frame.
         AvatarPart? hairBelow, hairShade, hair, hairOver;
@@ -318,8 +343,20 @@ public sealed class CharacterRenderer
         return null;
     }
 
-    private AvatarPart? LoadFace(int faceId)
+    private AvatarPart? LoadFace(int faceId, int emotionId, int emotionFrame)
     {
+        // Active emotion → use its frame. Faces that author no node for this emotion
+        // fall through to the default (silent fallback, matching the v95 client).
+        if (emotionId > 0)
+        {
+            var name = EmotionName(emotionId);
+            // Numbered-frame layout (blink, cry, …): {name}/{i}/face.
+            var node = LoadPart($"Face/{faceId:D8}.img/{name}/{emotionFrame}/face");
+            if (node is not null) return node;
+            // Single-canvas layout (troubled, smile, hum, most one-shots): {name}/face.
+            node = LoadPart($"Face/{faceId:D8}.img/{name}/face");
+            if (node is not null) return node;
+        }
         _activeBlinkDelays = EnsureBlinkDelays(faceId);
         if (_blinking && _activeBlinkDelays.Length > 0)
         {
@@ -345,6 +382,56 @@ public sealed class CharacterRenderer
         var arr = delays.ToArray();
         _blinkDelaysByFace[faceId] = arr;
         return arr;
+    }
+
+    /// <summary>Per-frame delays (ms) of an emotion on a given face, cached after the
+    /// first read. The WZ Face stores emotions in two layouts: <c>{name}/0..N/face</c>
+    /// numbered frames (blink, cry, …) and <c>{name}/face</c> single canvas (troubled,
+    /// smile, most one-shots). The single-canvas form uses a 2500 ms default duration
+    /// when no <c>delay</c> child is present — matches the v95 client
+    /// <c>CActionMan::LoadFaceLook</c> and v83 client <c>Face.h</c>. Empty only when the
+    /// face authors no node for that emotion at all.</summary>
+    public int[] EmotionFrameDelays(int faceId, int emotionId)
+    {
+        if (emotionId <= 0 || emotionId >= EmotionNames.Length) return Array.Empty<int>();
+        var key = (faceId, emotionId);
+        if (_emotionDelaysByFace.TryGetValue(key, out var cached)) return cached;
+        var name = EmotionNames[emotionId];
+        var delays = new List<int>();
+        for (var i = 0; i < 32; i++)
+        {
+            if (_characterWz?.GetItem($"Face/{faceId:D8}.img/{name}/{i}") is not WzProperty frame) break;
+            // Emotion frames in the GMS v95 face WZ frequently omit the `delay` child;
+            // v83 client `Face.h` defaults to 2500 ms in that case, and the v95 client
+            // `CActionMan::LoadFaceLook` likewise leans on a multi-second per-frame
+            // hold. Using 100 ms would revert the face within ~6 frames (a "fraction
+            // of a second" as observed).
+            var d = frame.Get("delay") switch { int v => v, short s => s, long l => (int)l, _ => 2500 };
+            delays.Add(d <= 0 ? 2500 : d);
+        }
+        // Single-canvas fallback: many emotions (troubled, smile, hum, …) store the
+        // face directly under the emotion node with no numbered frame index.
+        if (delays.Count == 0 &&
+            _characterWz?.GetItem($"Face/{faceId:D8}.img/{name}") is WzProperty root &&
+            root.Get("face") is WzCanvas)
+        {
+            var d = root.Get("delay") switch { int v => v, short s => s, long l => (int)l, _ => 2500 };
+            delays.Add(d <= 0 ? 2500 : d);
+        }
+        var arr = delays.ToArray();
+        _emotionDelaysByFace[key] = arr;
+        return arr;
+    }
+
+    /// <summary>Total play time of an emotion's WZ frames in ms — what v95
+    /// <c>CAvatar::PrepareFaceLayer</c> computes when the server passes
+    /// <c>duration = -1</c>. Returns 0 when the face authors no node for that emotion.</summary>
+    public int EmotionDurationMs(int faceId, int emotionId)
+    {
+        var d = EmotionFrameDelays(faceId, emotionId);
+        var sum = 0;
+        foreach (var x in d) sum += x;
+        return sum;
     }
 
     private AvatarPart? LoadHair(int hairId, string layer) =>

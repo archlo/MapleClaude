@@ -53,6 +53,19 @@ public sealed class GameStage : Stage
     private readonly Dictionary<int, MobLook> _mobs = new();
     // Mob IDs we control (MobChangeController ctrl=1)
     private readonly HashSet<int> _controlledMobs = new();
+    // Mob AI controllers - one per controlled mob, driven by Mob.wz info nodes via MobInfoService.
+    // Created on MobChangeController(isCtrl=true); deferred via _pendingCtrl when _field isn't loaded
+    // yet (the new map's MobChangeController packets arrive during the post-SetField fade-out
+    // window, before ApplyFieldChange swaps _field at full black). The mob-tick in Update drains
+    // _pendingCtrl every frame once _field is non-null. Without these the mobs we're nearest to
+    // (= ours to control) appear frozen to ourselves AND to every other client.
+    private readonly Dictionary<int, MobController> _mobCtl = new();
+    private readonly HashSet<int> _pendingCtrl = new();
+    private readonly Random _mobRng = new();
+    // Per-player i-frame after taking damage from any mob (matches the GMS ~0.7s window).
+    // While > 0 the touch-damage trigger below skips all collisions so mobs can't combo us.
+    private float _userHitCooldown;
+    private MobInfoService? _mobInfoSvc;
 
     // Other players
     private readonly Dictionary<int, OtherCharLook> _otherChars = new();
@@ -64,10 +77,15 @@ public sealed class GameStage : Stage
     // Damage numbers
     private DamageNumber? _dmgNumbers;
 
+    // Over-head emotion bubbles (Effect.wz/EmotionEffect.img). Spawned when the local
+    // player or a nearby player triggers a face expression; one-shot, world-space.
+    private EmotionBubble? _emotionBubble;
+
     // Always-visible panels
     private StatusBar? _statusBar;
     private ChatBar? _chatBar;
     private ChatBalloonLayer? _balloons;
+    private ChatBalloonLayer? _npcBalloons;   // ambient NPC chatter (info/speak), keyed by NPC objId
     private MiniMap? _miniMap;
     private BuffList? _buffList;
 
@@ -78,10 +96,26 @@ public sealed class GameStage : Stage
     private StatsInfo? _stats;
     private StatDetailInfo? _statDetail;
     private QuestLog? _quest;
+    private QuestDetail? _questDetail;
+    // Client-side quest state for marker/availability computation: questId → (state, progress value).
+    // State mirrors the server: 1 = PERFORM (in progress, value = mob-kill string), 2 = COMPLETE.
+    private readonly Dictionary<int, (byte State, string Value)> _questStates = new();
+    // NPC template id → which quest marker floats above its head (recomputed by RefreshQuestAvailability).
+    private enum QuestMarkerKind { None, New, InProgress }
+    private readonly Dictionary<int, QuestMarkerKind> _npcMarkers = new();
+    // Animated quest-marker icons (UI.wz/UIWindow2.img/QuestIcon): group 0 = "!" lightbulb (new quest),
+    // group 5 = "?" (in-progress turn-in). Shared frame clock advanced in Update.
+    private WzSprite[] _questMarkNew = [];
+    private WzSprite[] _questMarkProgress = [];
+    private int _markerFrame;
+    private float _markerTimer;
     private KeyConfig? _keyConfig;
     private QuickSlotConfig? _quickSlotConfig;
+    private QuickSlotBar? _quickSlots;
     private OptionMenu? _optionMenu;
     private CharInfo? _charInfo;
+    private int _lastClickCharId = -1;     // last field-avatar clicked (for double-click → profile)
+    private double _lastClickTime;          // seconds (Environment.TickCount64 / 1000.0)
 
     // New high-priority panels
     private WorldMap?       _worldMap;
@@ -109,6 +143,15 @@ public sealed class GameStage : Stage
     // Accumulated stat snapshot from server packets
     private CharStats _charStats = new();
 
+    // Accumulated skill records (id → record). Single-skill ChangeSkillRecord
+    // deltas merge into this set rather than replacing it; the Skill window is
+    // rebuilt from it + the job's full Skill.wz tree. _lastSkillJob gates the
+    // (WZ-walking) rebuild to actual job changes, not every StatChanged.
+    private readonly Dictionary<int, SkillRecord> _skillRecords = new();
+    private int _lastSkillJob = int.MinValue;
+    private readonly Dictionary<int, WzSprite?> _skillIconCache = new();
+    private readonly List<SkillEffect> _skillEffects = new();
+
     // Input state
     private bool _moveLeft;
     private bool _moveRight;
@@ -127,7 +170,6 @@ public sealed class GameStage : Stage
 
     // One-shot debug-log latch for the not-yet-implemented MobMove(227)
     // outgoing path; see comment block in Update.
-    private bool _loggedMobMoveTodo;
 
     // ── In-game resolution ───────────────────────────────────────────────────
     // The login flow runs at 800×600; entering a map switches to the larger
@@ -157,9 +199,14 @@ public sealed class GameStage : Stage
     // Melee attack pacing.
     private float _attackCooldown;
     private const float AttackCooldownSeconds = 0.6f;
+
+    // Emotion send pacing — matches the v95 client's CWvsContext::SendEmotionChange
+    // 2000 ms guard between successive UserEmotion packets.
+    private float _emotionCooldown;
+    private const float EmotionCooldownSeconds = 2.0f;
     private const int MeleeReachX = 120;   // px in front of the player
     private const int MeleeReachY = 40;    // px above/below the player's foot point
-    private const int MaxMeleeTargets = 6; // v95 caps a melee swing at 6 mobs
+    private const int MaxMeleeTargets = 15; // v95 caps a melee swing at 15 mobs (IDB: CMobPool::FindHitMobInRect apMob[15])
     private static readonly Random _attackRng = new();
 
     public GameStage(
@@ -180,6 +227,7 @@ public sealed class GameStage : Stage
         _charWz = charWz;
         _npcWz  = npcWz;
         _mobWz  = mobWz;
+        _mobInfoSvc = new MobInfoService(mobWz);
     }
 
     public override void OnEnter(MapleClaudeGame game)
@@ -254,6 +302,9 @@ public sealed class GameStage : Stage
         _statusBar = new StatusBar(_loader, _ui, font, basicFont) { IsVisible = true };
         _chatBar = new ChatBar(_loader, _ui, font) { IsVisible = true };
         _balloons = new ChatBalloonLayer(_loader, _ui, font);
+        _npcBalloons = new ChatBalloonLayer(_loader, _ui, font);
+        _questMarkNew      = LoadQuestIcon(0);   // "!" lightbulb (new quest available)
+        _questMarkProgress = LoadQuestIcon(5);   // "?" (in-progress turn-in)
         _chatBar.Bar = _statusBar;   // chat aligns to the status bar's authentic chat-input rect
         _miniMap = new MiniMap(_loader, _ui, font, _logger) { IsVisible = true };
         _buffList = new BuffList(_loader, _ui, font) { IsVisible = true };
@@ -300,6 +351,8 @@ public sealed class GameStage : Stage
         _skill = new SkillBook(_loader, _ui, font);
         _skill.OnSkillUp = id => SendIfConnected(GameSender.SkillUp(id));
         _skill.OnSkillCast = CastSkill;
+        _skill.BookIconResolver = Game.Skills.GetBookIcon;
+        _skill.BookNameResolver = JobName;
         // Stat window uses the small crisp 12px font: Game.Font is Tahoma 11*point* (~14.7px), too
         // large for the dense WZ stat rows (18px pitch) — it made the values oversized and sit low.
         // basicFont (Tahoma 12px) matches the authentic CUIStat value font height.
@@ -316,11 +369,37 @@ public sealed class GameStage : Stage
         {
             if (Game.Session.IsConnected) Game.Session.Send(GameSender.QuestResign((short)id));
         };
+        _questDetail = new QuestDetail(_loader, _ui, _npcWz, font);
+        _quest.OnSelectQuest = id =>
+        {
+            var data = Game.Quests.Get(id);
+            var state = _questStates.TryGetValue(id, out var st) ? st.State : (byte)0;
+            _questDetail.SetQuest(data, state);
+        };
+        _quest.OnLevelFilterChanged = RefreshQuestAvailability;
+        _questDetail.OnRemoteAccept = id =>
+        {
+            var q = Game.Quests.Get(id);
+            if (q is null || !Game.Session.IsConnected) return;
+            Game.Session.Send(GameSender.QuestStartScript((short)id, q.Start.Npc, 0, 0));
+        };
+        _questDetail.OnResign = id =>
+        {
+            if (Game.Session.IsConnected) Game.Session.Send(GameSender.QuestResign((short)id));
+            _questDetail.IsVisible = false;
+        };
+        _questDetail.OnFindNpc = id =>
+        {
+            var q = Game.Quests.Get(id);
+            if (q is null) return;
+            FocusCameraOnNpc(q.Start.Npc != 0 ? q.Start.Npc : q.Complete.Npc);
+        };
         _keyConfig = new KeyConfig(_loader, _ui, font);
         _quickSlotConfig = new QuickSlotConfig(_loader, _ui, font);
         _keyConfig.OnOpenQuickSlot = () => _quickSlotConfig!.Open();
+        _quickSlots = new QuickSlotBar(_loader, _ui, font, _keyConfig.BindingAt, _keyConfig.BindSkillToKey, SkillIcon);
         _optionMenu = new OptionMenu(_loader, _ui, font);
-        _charInfo = new CharInfo(_loader, _ui, font);
+        _charInfo = new CharInfo(_loader, _ui, basicFont, _iconLoader);
         _npcTalk = new NpcTalk(_loader, _ui, _npcWz, _dlgBody, _dlgBold, _dlgName, _npcSubst);
         _shop = new Shop(_loader, _ui, font);
         _shop.OnBuy = (slot, itemId, price, count) =>
@@ -354,7 +433,7 @@ public sealed class GameStage : Stage
         };
 
         // StatusBar full submenu callbacks
-        _statusBar.OnInfo    = () => _charInfo!.IsVisible  = !_charInfo.IsVisible;
+        _statusBar.OnInfo    = ToggleOwnProfile;
         _statusBar.OnEquip   = () => _equip!.IsVisible     = !_equip.IsVisible;
         _statusBar.OnItems   = () => _item!.IsVisible      = !_item.IsVisible;
         _statusBar.OnSkills  = () => _skill!.IsVisible     = !_skill.IsVisible;
@@ -366,7 +445,7 @@ public sealed class GameStage : Stage
             _loggerFactory.CreateLogger<CashShopStage>(), _ui, Game.Font,
             Game.GraphicsDevice.PresentationParameters.BackBufferWidth,
             Game.GraphicsDevice.PresentationParameters.BackBufferHeight));
-        _statusBar.OnCharacter = () => _charInfo!.IsVisible = !_charInfo.IsVisible;
+        _statusBar.OnCharacter = ToggleOwnProfile;
 
         _panels.Add(_statusBar);
         _panels.Add(_chatBar);
@@ -378,8 +457,10 @@ public sealed class GameStage : Stage
         _panels.Add(_stats);
         _panels.Add(_statDetail);
         _panels.Add(_quest);
+        _panels.Add(_questDetail);
         _panels.Add(_keyConfig);
         _panels.Add(_quickSlotConfig);
+        _panels.Add(_quickSlots);
         _panels.Add(_optionMenu);
 
         // ── Persisted settings (keybinds + volumes) ───────────────────────────
@@ -392,6 +473,7 @@ public sealed class GameStage : Stage
         ApplyAudioVolumes();
         _keyConfig.OnBindingsChanged += SaveSettings;
         _keyConfig.OnSaveToServer += SendFuncKeyMapModified;
+        _keyConfig.SkillIconResolver = SkillIcon;
         _optionMenu.OnSettingsChanged += () => { SaveSettings(); ApplyAudioVolumes(); ApplyResolution(_optionMenu.ResW, _optionMenu.ResH); };
         _panels.Add(_charInfo);
         _panels.Add(_npcTalk);
@@ -405,7 +487,12 @@ public sealed class GameStage : Stage
         _userList      = new UserList     (_loader, _ui, font);
         _channelSelect = new ChannelSelect(_loader, _ui, font);
         _messenger     = new StatusMessenger(font) { Position = new Vector2(10, 340) };
-        _dmgNumbers    = new DamageNumber(font);
+        // v95 floating damage numbers use the WZ damage-skin sprites from
+        // Effect.wz/BasicEff.img (NoRed1 for white digits, NoCri1 for crit, NoMiss for
+        // misses). DamageDigits loads them once; DamageNumber draws them with a text
+        // fallback if any glyph is missing.
+        _dmgNumbers    = new DamageNumber(font, new DamageDigits(Game.EffectWz, _loader));
+        _emotionBubble = new EmotionBubble(Game.EffectWz, _loader);
         _familyWindow  = new FamilyWindow (_loader, _ui, font);
 
         // ── Community window actions → protocol senders ───────────────────────────
@@ -424,7 +511,7 @@ public sealed class GameStage : Stage
         // StatusBar); their items route to the panels below.
         _statusBar.OnQuest   = () => _quest!.IsVisible         = !_quest.IsVisible;
         _statusBar.OnChannel = () => _channelSelect!.IsVisible = !_channelSelect.IsVisible;
-        _statusBar.OnChat    = () => { };   // chat expand/collapse handled in 23b
+        _statusBar.OnChat    = () => _chatBar?.ToggleMode();   // BtChat shows/hides the chat input row
         _statusBar.OnMTS     = () => { };
         _statusBar.OnClaim   = () => { };
         // Menu pop-up items (Item/Equip/Stat/Skill/Quest reuse the callbacks wired above).
@@ -473,6 +560,8 @@ public sealed class GameStage : Stage
             // the snapshot is persistent, so stats.Level is set on every packet.
             if ((mask & 0x10) != 0 && stats.Level > 0)
                 _messenger?.ShowLevelUp(stats.Level);
+            if ((mask & 0x10) != 0 || (mask & 0x20) != 0)
+                RefreshQuestAvailability();   // a level-up / job-advance can unlock new quests
         };
 
         _netHandler.OnFuncKeyInit = _ =>
@@ -522,6 +611,7 @@ public sealed class GameStage : Stage
         var fh = Game.FieldHandlers;
 
         fh.OnSkillRecordResult += records => ApplySkills(records);
+        fh.OnQuickslotInit += keys => _quickSlots?.SetKeys(keys);
         // Full per-stat buff decode is deferred; the buff icon is added
         // optimistically on cast (CastSkill). A reset clears the HUD.
         fh.OnTemporaryStatReset += () => _buffList?.ClearBuffs();
@@ -533,6 +623,14 @@ public sealed class GameStage : Stage
             if ((a.Mask & 0x1000)!= 0) { if (_stats != null) _stats.Mp = a.Mp; if (_statusBar != null) _statusBar.Mp = a.Mp; }
             if ((a.Mask & 0x2000)!= 0) { if (_stats != null) _stats.MaxMp = a.MaxMp; if (_statusBar != null) _statusBar.MaxMp = a.MaxMp; }
             if ((a.Mask & 0x10)  != 0 && a.Level > 0) { if (_stats != null) _stats.Level = a.Level; if (_statusBar != null) _statusBar.Level = a.Level; }
+            if ((a.Mask & 0x20)  != 0)   // JOB — a live advancement: relabel + re-tab the Skill window
+            {
+                _charStats.JobId = a.Job;
+                var jobName = JobName(a.Job);
+                if (_stats != null) { _stats.JobId = a.Job; _stats.Job = jobName; }
+                if (_statusBar != null) _statusBar.JobName = jobName;
+                SetSkillJob(a.Job);   // CharInfo is repopulated from _charStats each time it opens
+            }
             if ((a.Mask & 0x4000)!= 0) { if (_stats != null) _stats.AP = a.Ap; }
             if ((a.Mask & 0x8000)!= 0) { if (_stats != null && _skill != null) _skill.SP = a.Sp; }
             if ((a.Mask & 0x40000)!=0) { if (_item != null) _item.Meso = a.Meso; }   // MONEY
@@ -645,7 +743,10 @@ public sealed class GameStage : Stage
         {
             _quest?.UpdateQuest(a.QuestId, a.State, a.Value,
                 Game.Names.QuestName(a.QuestId) ?? $"Quest {a.QuestId}");
+            if (a.State == 0) _questStates.Remove(a.QuestId);
+            else              _questStates[a.QuestId] = (a.State, a.Value ?? string.Empty);
             if (a.State == 2) _messenger?.ShowQuest(Game.Names.QuestName(a.QuestId) ?? $"Quest {a.QuestId}");
+            RefreshQuestAvailability();   // a start/complete/forfeit changes markers + the Available list
         };
 
         // ── In-game migration (channel transfer / cash-shop return) ───────────
@@ -661,16 +762,29 @@ public sealed class GameStage : Stage
         fh.OnMobEnter += args =>
         {
             var mob = new MobLook(args.MobId, args.TemplateId,
-                                  new Vector2(args.X, args.Y));
+                                  new Vector2(args.X, args.Y))
+            {
+                Name  = Game.Names?.MobName(args.TemplateId) ?? string.Empty,
+                Level = _mobInfoSvc?.Get(args.TemplateId).Level ?? 0,
+            };
             mob.Load(_loader!, _mobWz);
             _mobs[args.MobId] = mob;
             _logger.LogDebug("Mob enter: id={Id} tmpl={T} pos=({X},{Y})", args.MobId, args.TemplateId, args.X, args.Y);
+        };
+
+        // MobHPIndicator(298) — server's "you just hit this mob" update. Pushes the mob's
+        // current HP percentage to drive the HP bar above the mob (auto-hides after ~5s).
+        fh.OnMobHpIndicator += (mobId, pct) =>
+        {
+            if (_mobs.TryGetValue(mobId, out var mob)) mob.SetHpPercent(pct);
         };
 
         fh.OnMobLeave += mobId =>
         {
             _mobs.Remove(mobId);
             _controlledMobs.Remove(mobId);
+            _mobCtl.Remove(mobId);
+            _pendingCtrl.Remove(mobId);
         };
 
         fh.OnMobMove += args =>
@@ -698,12 +812,26 @@ public sealed class GameStage : Stage
                 }
                 if (args.Hp == 0) mob.OnDie();
             }
+            // Passive (non-firstAttack) mobs flip aggro when damaged. In a single-player
+            // session every MobDamaged is us hitting it, so we just route the event to our
+            // controller for the aggro timer to kick in. (Multi-client: this would
+            // over-aggro on any nearby player's hit; revisit when party play lands.)
+            if (_mobCtl.TryGetValue(args.MobId, out var ctl)) ctl.OnDamagedByPlayer();
         };
 
         fh.OnMobChangeController += (mobId, isCtrl) =>
         {
-            if (isCtrl) _controlledMobs.Add(mobId);
-            else        _controlledMobs.Remove(mobId);
+            if (isCtrl)
+            {
+                _controlledMobs.Add(mobId);
+                TryCreateMobController(mobId);
+            }
+            else
+            {
+                _controlledMobs.Remove(mobId);
+                _mobCtl.Remove(mobId);
+                _pendingCtrl.Remove(mobId);
+            }
         };
 
         fh.OnNpcEnter += args =>
@@ -718,6 +846,7 @@ public sealed class GameStage : Stage
                 };
                 npc.Load(_loader!, _npcWz);
                 npc.FaceLeft(args.FacingLeft);
+                AttachAmbientSpeak(npc, args.TemplateId);
                 _npcs.Add(npc);
             }
         };
@@ -738,10 +867,44 @@ public sealed class GameStage : Stage
 
         fh.OnUserLeave  += id => _otherChars.Remove(id);
 
+        // Character-profile response: open the UserInfo window for the requested player. The packet
+        // carries no name/look, so reuse the in-field OtherCharLook (keyed by char id) for those.
+        fh.OnCharacterInfo += a =>
+        {
+            if (_charInfo == null) return;
+            var oc = _otherChars.TryGetValue(a.CharId, out var v) ? v : null;
+            _charInfo.ShowProfile(oc?.Name ?? string.Empty, a.Level, JobName(a.Job), a.Fame,
+                a.Guild, a.Alliance, _charRenderer, oc?.Look, a.Pets);
+        };
+
         fh.OnUserMove   += args =>
         {
             if (_otherChars.TryGetValue(args.CharId, out var other))
                 other.SetPosition(args.X, args.Y);
+        };
+
+        // UserEmotion broadcast (charId>0) / UserEmotionLocal echo (charId==0).
+        // Both apply the emotion + spawn the over-head bubble. The local trigger
+        // already applied locally in TriggerEmotion before the packet was sent —
+        // a 0-charId echo from the server (Kinoko vanilla doesn't emit one) just
+        // refreshes the timer idempotently.
+        fh.OnUserEmotion += a =>
+        {
+            if (a.CharId == 0 || a.CharId == Game.CharacterId)
+            {
+                _player?.SetEmotion(a.Emotion, a.DurationMs);
+                if (a.Emotion > 0)
+                {
+                    var pos = _physics?.Position ?? _player?.Position ?? Vector2.Zero;
+                    _emotionBubble?.Add(a.Emotion, pos - new Vector2(0, 60));
+                }
+            }
+            else if (_otherChars.TryGetValue(a.CharId, out var oc))
+            {
+                oc.SetEmotion(a.Emotion, a.DurationMs);
+                if (a.Emotion > 0)
+                    _emotionBubble?.Add(a.Emotion, oc.Position - new Vector2(0, 60));
+            }
         };
 
         fh.OnDropEnter += args =>
@@ -852,10 +1015,10 @@ public sealed class GameStage : Stage
 
         // ── Social: group chat / whisper / party / friends ────────────────────
         fh.OnGroupMessage += (type, from, text) =>
-            _chatBar?.AddLine($"[{GroupPrefix(type)}] {from} : {text}", GroupColor(type));
+            _chatBar?.AddLine($"[{GroupPrefix(type)}] {from} : {text}", GroupColor(type), GroupLineType(type));
 
         fh.OnWhisper += (from, ch, text) =>
-            _chatBar?.AddLine($"[whisper] {from} : {text}", new Color(220, 150, 220));
+            _chatBar?.AddLine($"[whisper] {from} : {text}", new Color(220, 150, 220), ChatBar.ChatLineType.Whisper);
 
         fh.OnFriendList += list =>
         {
@@ -1025,38 +1188,54 @@ public sealed class GameStage : Stage
         base.OnExit();
     }
 
+    // Map-change fade transition. _fadeAlpha: 0 = clear .. 1 = opaque black. On a
+    // field-change SetField we fade to black, swap the map at full black (pop-free,
+    // via _pendingField), then fade back in (stage transitions are otherwise instant).
+    private float _fadeAlpha;
+    private int   _fadePhase;            // 0 idle, +1 fading to black, -1 fading in
+    private SetFieldArgs? _pendingField; // SetField awaiting the full-black swap moment
+    private const float FadeToBlackPerSec = 1f / 0.18f;  // ~180 ms to black
+    private const float FadeInPerSec      = 1f / 0.30f;  // ~300 ms to clear
+
     private void OnSetField(SetFieldArgs args)
     {
         _fieldKey = args.FieldKey;
-        if (args.Stat is null || _map is null)
+        if (_map is null)
         {
             return;
         }
-        Game.CharacterId = args.Stat.CharacterId;
-        // SetField's CharacterStat is the authoritative name source (StatChanged may not carry it).
-        if (!string.IsNullOrEmpty(args.Stat.Name))
+        // Stat / look / inventory / quests only arrive with the migrate (CharacterData)
+        // SetField. A field-transfer SetField (portal / channel / revive) carries only a
+        // minimal { posMap, portal } block, so args.Stat is null there - seed nothing from it.
+        if (args.Stat is not null)
         {
-            _myName = args.Stat.Name;
-            if (_statusBar != null) _statusBar.CharName = _myName;
-        }
-        // Seed the stat snapshot from SetField's CharacterStat so the Stat / Character-info windows
-        // show the real name + stats immediately (StatChanged arrives later and never carries the
-        // name — that's why the Stat window's name row was blank). Guild comes from a separate
-        // packet, so preserve any value already learned.
-        var seed = args.Stat;
-        _charStats = new CharStats
-        {
-            Name  = seed.Name, Level = seed.Level, JobId = seed.Job,
-            Str = seed.Str, Dex = seed.Dex, Int = seed.Int, Luk = seed.Luk,
-            Hp = seed.Hp, MaxHp = seed.MaxHp, Mp = seed.Mp, MaxMp = seed.MaxMp,
-            Exp = seed.Exp, AP = seed.Ap, Fame = seed.Pop, Guild = _charStats.Guild,
-        };
-        PushCharStats(_charStats);
-        if (args.Look is not null && _player is not null && _charRenderer is not null)
-        {
-            _myLook = args.Look;
-            _player.SetAvatar(_charRenderer, args.Look);
-            _charInfo?.SetAvatar(_charRenderer, args.Look);   // profile shows the real avatar
+            Game.CharacterId = args.Stat.CharacterId;
+            // SetField's CharacterStat is the authoritative name source (StatChanged may not carry it).
+            if (!string.IsNullOrEmpty(args.Stat.Name))
+            {
+                _myName = args.Stat.Name;
+                if (_statusBar != null) _statusBar.CharName = _myName;
+            }
+            // Seed the stat snapshot from SetField's CharacterStat so the Stat / Character-info
+            // windows show the real name + stats immediately (StatChanged arrives later and never
+            // carries the name). Guild comes from a separate packet, so preserve any known value.
+            var seed = args.Stat;
+            _charStats = new CharStats
+            {
+                Name  = seed.Name, Level = seed.Level, JobId = seed.Job,
+                Str = seed.Str, Dex = seed.Dex, Int = seed.Int, Luk = seed.Luk,
+                Hp = seed.Hp, MaxHp = seed.MaxHp, Mp = seed.Mp, MaxMp = seed.MaxMp,
+                Exp = seed.Exp, AP = seed.Ap, Fame = seed.Pop, Guild = _charStats.Guild,
+            };
+            PushCharStats(_charStats);
+            if (args.Look is not null && _player is not null && _charRenderer is not null)
+            {
+                _myLook = args.Look;
+                _player.SetAvatar(_charRenderer, args.Look);
+                _charInfo?.SetAvatar(_charRenderer, args.Look);   // profile shows the real avatar
+            }
+            PopulateInventory(args);
+            PopulateQuests(args);
         }
         // Ask the server for our guild roster once (it isn't pushed on login).
         if (!_guildLoadSent && Game.Session.IsConnected)
@@ -1064,40 +1243,100 @@ public sealed class GameStage : Stage
             Game.Session.Send(GameSender.GuildLoad());
             _guildLoadSent = true;
         }
+        // Clear the old field's entities NOW at the SetField boundary - the deferred terrain
+        // swap (see AdvanceFieldTransition) only runs ~180 ms later at full black, by which
+        // point the new map's NpcEnter / MobEnter / DropEnter spawn packets have already
+        // arrived. Clearing then would wipe the freshly-spawned new map entities. Spawn
+        // handlers don't depend on _field, so populating during the fade-out window is fine.
+        _mobs.Clear();
+        _controlledMobs.Clear();
+        _mobCtl.Clear();          // controllers reference the OLD FieldScene; they'd be orphaned after the swap
+        _pendingCtrl.Clear();
+        _npcs.Clear();
+        _otherChars.Clear();
+        _drops.Clear();
+        _emotionBubble?.Clear();   // emotion bubbles from the old map shouldn't persist into the new one
+
+        // Defer the actual terrain swap to the fully-black moment of the fade transition
+        // (see AdvanceFieldTransition) so the old map never visibly pops to the new one.
+        _pendingField = args;
+        _fadePhase = 1;   // begin fade-to-black
+    }
+
+    // Performs the real map swap: tears down the previous field's entities and loads the
+    // destination terrain. Destination map + spawn portal come from the full CharacterStat
+    // on a migrate SetField, or the minimal top-level block on a transfer.
+    private void ApplyFieldChange(SetFieldArgs args)
+    {
+        int  targetMap    = args.Stat?.PosMap ?? args.PosMap;
+        byte targetPortal = args.Stat?.Portal ?? args.Portal;
         try
         {
-            // A SetField (re)initializes the field — drop every entity from the
-            // previous map so a portal/channel transfer doesn't leak stale
-            // mobs/npcs/drops/players. The server re-sends them after SetField.
-            _mobs.Clear();
-            _controlledMobs.Clear();
-            _npcs.Clear();
-            _otherChars.Clear();
-            _drops.Clear();
-
-            _field = new FieldScene(_loggerFactory.CreateLogger<FieldScene>(), _map, _loader!);
-            _field.Load(args.Stat.PosMap);
+            // Entity clears already happened immediately at the SetField boundary in OnSetField -
+            // this swap is deferred to full black, and clearing here would wipe the new map's
+            // spawn packets that arrived during the fade-out window.
+            _field = new FieldScene(_loggerFactory.CreateLogger<FieldScene>(), _map!, _loader!);
+            _field.Load(targetMap);
             _physics = new PlayerController(_field);
-            _field.PlacePlayerAtPortal(_physics, args.Stat.Portal);
+            _field.PlacePlayerAtPortal(_physics, targetPortal);
             // Re-position archlo's CharLook to the spawn point.
             if (_player != null)
             {
                 _player.Position = _physics.Position;
             }
             _camera.Target = _physics.Position;
-            _camera.MapBounds = _field.Bounds;   // VR rect when present, else the foothold AABB (shared with physics)
-            PopulateInventory(args);
-            PopulateQuests(args);
-            UpdateMapName(args.Stat.PosMap);
+            _camera.MapBounds = _field.Bounds;   // VR rect when present, else the foothold AABB
+            UpdateMapName(targetMap);
             _miniMap?.SetField(_field.MiniMap, _mapStreet, _mapNameText);
             PlayMapBgm(_field.Info.Bgm);
-            _logger.LogInformation("SetField processed — mapId={Map} portal={Portal} money={Money}",
-                args.Stat.PosMap, args.Stat.Portal, args.Money);
+            _logger.LogInformation("SetField processed - mapId={Map} portal={Portal} money={Money}",
+                targetMap, targetPortal, args.Money);
         }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "Failed to load field {Id}", args.Stat.PosMap);
+            _logger.LogError(ex, "Failed to load field {Id}", targetMap);
         }
+    }
+
+    // Drives the map-change fade: fade to black, swap the map at full black (pop-free), then
+    // fade back in. Runs on the Update thread alongside OnSetField, so the swap is race-free.
+    private void AdvanceFieldTransition(float dt)
+    {
+        if (_fadePhase > 0)            // fading to black
+        {
+            _fadeAlpha += dt * FadeToBlackPerSec;
+            if (_fadeAlpha >= 1f)
+            {
+                _fadeAlpha = 1f;
+                if (_pendingField is { } pending)
+                {
+                    _pendingField = null;
+                    ApplyFieldChange(pending);
+                }
+                _fadePhase = -1;       // begin fade-in
+            }
+        }
+        else if (_fadePhase < 0)       // fading in from black
+        {
+            _fadeAlpha -= dt * FadeInPerSec;
+            if (_fadeAlpha <= 0f)
+            {
+                _fadeAlpha = 0f;
+                _fadePhase = 0;
+            }
+        }
+    }
+
+    // Build the AI controller for a mob the server told us to drive. Deferred via
+    // _pendingCtrl when _field hasn't been swapped yet (new map's MobChangeController
+    // packets land during the fade-out, before ApplyFieldChange creates _field). The
+    // mob-tick block in Update drains _pendingCtrl every frame once _field is non-null.
+    private void TryCreateMobController(int mobId)
+    {
+        if (_field is null || _mobInfoSvc is null) { _pendingCtrl.Add(mobId); return; }
+        if (!_mobs.TryGetValue(mobId, out var look)) { _pendingCtrl.Add(mobId); return; }
+        var info = _mobInfoSvc.Get(look.TemplateId);
+        _mobCtl[mobId] = new MobController(look, _field, info, _mobRng);
     }
 
     // Walk-into-portal travel: if the player stands on a warp portal (one with a
@@ -1108,13 +1347,17 @@ public sealed class GameStage : Stage
     private bool TryEnterPortal()
     {
         if (_field is null || _physics is null || !Game.Session.IsConnected) return false;
+        if (_fadePhase != 0) return false;   // ignore portal input while a map transition is running
         var pos = _physics.Position;
         foreach (var portal in _field.Portals.Values)
         {
             if (portal.TargetMap <= 0 || portal.TargetMap == 999_999_999) continue;
             if (Vector2.Distance(pos, portal.Position) > PortalEnterRange) continue;
+            // The server resolves the portal by name on the CURRENT field, so send
+            // the source portal name (pn, e.g. "out00"), not the destination portal
+            // name (tn). See MigrationHandler.handleUserTransferFieldRequest.
             Game.Session.Send(GameSender.TransferField(
-                _fieldKey, portal.TargetMap, portal.TargetPortal, (short)pos.X, (short)pos.Y));
+                _fieldKey, portal.TargetMap, portal.Name, (short)pos.X, (short)pos.Y));
             _logger.LogInformation("Portal '{Name}' → map {Map} (portal {Tp})",
                 portal.Name, portal.TargetMap, portal.TargetPortal);
             return true;
@@ -1130,20 +1373,74 @@ public sealed class GameStage : Stage
         {
             return;
         }
-        _skill.SetSkills(records.Select(r =>
+        foreach (var r in records) _skillRecords[r.SkillId] = r; // delta-safe merge (never replace)
+        RebuildSkillBook();
+    }
+
+    // Skill icon for KeyConfig / quickslot bound keys (cached WzSprite from Skill.wz).
+    private WzSprite? SkillIcon(int skillId)
+    {
+        if (_skillIconCache.TryGetValue(skillId, out var s)) return s;
+        var canvas = Game.Skills.Get(skillId)?.Icon;
+        var sprite = canvas != null ? _loader?.Load(canvas) : null;
+        _skillIconCache[skillId] = sprite;
+        return sprite;
+    }
+
+    // Rebuild the Skill window's entries: every skill in the job's reachable
+    // Skill.wz tree (so learnable-but-unleveled skills appear), unioned with any
+    // server-granted records (covers learned skills outside the tree, and the
+    // case where Skill.wz is unavailable). Current levels come from the
+    // accumulated records; the per-job tab grouping happens in SkillBook.
+    private void RebuildSkillBook()
+    {
+        if (_skill is null)
         {
-            var info = Game.Skills.Get(r.SkillId);
+            return;
+        }
+        var ids = new HashSet<int>();
+        foreach (var root in JobConstants.GetSkillRoots(_skill.JobId))
+        {
+            foreach (var id in Game.Skills.EnumerateSkillIds(root))
+            {
+                ids.Add(id);
+            }
+        }
+        foreach (var id in _skillRecords.Keys)
+        {
+            ids.Add(id);
+        }
+
+        _skill.SetSkills(ids.Order().Select(id =>
+        {
+            var info = Game.Skills.Get(id);
+            _skillRecords.TryGetValue(id, out var rec);
+            var level = rec?.Level ?? 0;
             return new SkillBook.SkillEntry
             {
-                Id = r.SkillId,
-                Name = Game.Names.SkillName(r.SkillId) ?? $"Skill {r.SkillId}",
-                Level = r.Level,
-                MaxLevel = info?.MaxLevel ?? (r.MasterLevel > 0 ? r.MasterLevel : 20),
+                Id = id,
+                Name = Game.Names.SkillName(id) ?? $"Skill {id}",
+                Level = level,
+                MaxLevel = info?.MaxLevel ?? (rec is { MasterLevel: > 0 } ? rec.MasterLevel : 20),
                 Passive = info?.Passive ?? false,
-                MpCost = info?.MpConAt(Math.Max(1, r.Level)) ?? 0,
+                MpCost = info?.MpConAt(Math.Max(1, level)) ?? 0,
                 IconCanvas = info?.Icon,
             };
         }));
+    }
+
+    // Point the Skill window at a job and re-tab it — but only when the job
+    // actually changes (this is called on every StatChanged / stat push, and the
+    // rebuild walks Skill.wz). Used by the SetField seed and a live JOB change.
+    private void SetSkillJob(int jobId)
+    {
+        if (_skill is null || jobId == _lastSkillJob)
+        {
+            return;
+        }
+        _lastSkillJob = jobId;
+        _skill.JobId = jobId;
+        RebuildSkillBook();
     }
 
     // Double-click a learned active skill → cast it. Buff skills (those with a
@@ -1157,6 +1454,20 @@ public sealed class GameStage : Stage
         }
         Game.Session.Send(GameSender.UseSkill(skillId, (byte)level));
 
+        // Play the skill's body action (random from its WZ action list) + effect animations.
+        var cast = Game.Skills.GetCastInfo(skillId);
+        if (cast is not null)
+        {
+            if (cast.Actions.Length > 0)
+            {
+                var act = cast.Actions[_attackRng.Next(cast.Actions.Length)];
+                if ((_player?.PlayAction(act) ?? 0f) <= 0f) _player?.Attack(false);
+            }
+            SpawnSkillEffect(cast.Effect, screen: false);
+            SpawnSkillEffect(cast.Effect0, screen: false);
+            SpawnSkillEffect(cast.Screen, screen: true);
+        }
+
         var info = Game.Skills.Get(skillId);
         var buffSeconds = info?.BuffTimeAt(level) ?? 0;
         if (buffSeconds > 0)
@@ -1168,6 +1479,23 @@ public sealed class GameStage : Stage
         {
             _skill?.StartCooldown(skillId, cooldown);
         }
+    }
+
+    // Spawn a one-shot skill effect animation (anchored on the caster, or fullscreen).
+    private void SpawnSkillEffect(object? node, bool screen)
+    {
+        if (node is null) return;
+        var anim = _loader?.LoadAnimation(node);
+        if (anim is null) return;
+        _skillEffects.Add(new SkillEffect { Anim = anim, Flip = _player?.FacingLeft ?? false, Screen = screen });
+    }
+
+    private sealed class SkillEffect
+    {
+        public required AnimatedSprite Anim;
+        public bool Flip;
+        public bool Screen;
+        public double Elapsed;
     }
 
     // Double-click in the item grid: use a consumable, or equip an equip.
@@ -1404,17 +1732,146 @@ public sealed class GameStage : Stage
         Grade = it.Equip?.Grade ?? 0,   // potential rank → Quality dot
     };
 
-    /// <summary>Load the initial inventory + skills delivered in SetField's CharacterData.</summary>
+    /// <summary>Load the started + completed quests delivered in SetField's CharacterData into the
+    /// quest log and the client-side state map (used for NPC markers + Available-tab availability).</summary>
     private void PopulateQuests(SetFieldArgs args)
     {
         if (_quest is null || args.Quests is null) return;
-        _quest.SetQuests(args.Quests.Select(q => new QuestLog.QuestEntry
+        _questStates.Clear();
+        foreach (var q in args.Quests)
+            _questStates[q.QuestId] = (q.State, q.Value ?? string.Empty);
+        _quest.SetQuests(args.Quests.Select(q =>
         {
-            Id = q.QuestId,
-            Name = Game.Names.QuestName(q.QuestId) ?? $"Quest {q.QuestId}",
-            Progress = q.Value,
-            Complete = false,
+            var qd = Game.Quests.Get(q.QuestId);
+            return new QuestLog.QuestEntry
+            {
+                Id = q.QuestId,
+                Name = qd?.Name is { Length: > 0 } n ? n : (Game.Names.QuestName(q.QuestId) ?? $"Quest {q.QuestId}"),
+                Progress = q.Value,
+                Parent = qd?.Parent ?? string.Empty,
+                LvMin = qd?.Start.LvMin ?? 0,
+                LvMax = qd?.Start.LvMax ?? 0,
+                Complete = q.State == 2,
+            };
         }));
+        RefreshQuestAvailability();
+    }
+
+    /// <summary>Recompute, from Quest.wz + current quest state, which quests the player can start
+    /// (the Quest-log "Available" tab) and which marker floats over each NPC (<see cref="_npcMarkers"/>).
+    /// Mirrors the upstream Kinoko <c>QuestInfo.canStartQuest</c>/<c>canCompleteQuest</c> gates; the
+    /// server re-validates on accept, so the client errs toward showing rather than hiding.</summary>
+    private void RefreshQuestAvailability()
+    {
+        if (_quest is null) return;
+        var level = _charStats.Level;
+        var jobId = _charStats.JobId;
+        var available = new List<QuestLog.QuestEntry>();
+        _npcMarkers.Clear();
+
+        foreach (var (id, q) in Game.Quests.All())
+        {
+            if (!CanStartQuest(q, level, jobId)) continue;
+            available.Add(new QuestLog.QuestEntry
+            {
+                Id = id,
+                Name = string.IsNullOrEmpty(q.Name) ? (Game.Names.QuestName(id) ?? $"Quest {id}") : q.Name,
+                Progress = q.Blurb[0],
+                Parent = q.Parent,
+                LvMin = q.Start.LvMin,
+                LvMax = q.Start.LvMax,
+                Available = true,
+            });
+            if (q.Start.Npc != 0) _npcMarkers[q.Start.Npc] = QuestMarkerKind.New;
+        }
+
+        // In-progress quests put a "talk to me" ("?") marker on their complete NPC. Don't let it
+        // override a "new quest" lightbulb already claimed for that NPC.
+        foreach (var (qid, st) in _questStates)
+        {
+            if (st.State != 1) continue;
+            var q = Game.Quests.Get(qid);
+            if (q is null || q.Complete.Npc == 0) continue;
+            if (!_npcMarkers.ContainsKey(q.Complete.Npc))
+                _npcMarkers[q.Complete.Npc] = QuestMarkerKind.InProgress;
+        }
+
+        available.Sort((a, b) => a.Id.CompareTo(b.Id));
+        _quest.SetAvailable(available);
+    }
+
+    private bool CanStartQuest(QuestData q, int level, int jobId)
+    {
+        if (q.Start.Npc == 0) return false;          // no start NPC ⇒ not a clickable/available quest
+        if (_questStates.ContainsKey(q.Id)) return false;   // already started or completed
+        return MeetsCheck(q.Start, level, jobId);
+    }
+
+    /// <summary>FIND NPC button — pan the camera to the start (or complete) NPC if it spawned on
+    /// the current field. Otherwise flash a system-chat message so the user knows nothing happened.</summary>
+    private void FocusCameraOnNpc(int templateId)
+    {
+        if (templateId == 0) return;
+        var npc = _npcs.FirstOrDefault(n => n.NpcId == templateId);
+        if (npc is null)
+        {
+            _chatBar?.AddLine("This NPC is not on the current map.", new Color(220, 200, 120));
+            return;
+        }
+        _camera.Target = npc.Position;
+    }
+
+    private bool CanCompleteQuest(QuestData q, int level, int jobId)
+    {
+        if (!_questStates.TryGetValue(q.Id, out var st) || st.State != 1) return false;
+        return MeetsCheck(q.Complete, level, jobId) && MobProgressMet(q.Complete, st.Value);
+    }
+
+    private bool MeetsCheck(QuestReq r, int level, int jobId)
+    {
+        // BtAllLevel on the QuestLog disables the level filter so the player can browse out-of-range
+        // quests; the level fields still display on the detail panel.
+        var enforceLevel = !(_quest?.ShowAllLevels ?? false);
+        if (enforceLevel)
+        {
+            if (r.LvMin > 0 && level < r.LvMin) return false;
+            if (r.LvMax > 0 && level > r.LvMax) return false;
+        }
+        if (!JobAllowed(r.Jobs, jobId)) return false;
+        foreach (var (pqId, pqState) in r.Quests)
+        {
+            var have = _questStates.TryGetValue(pqId, out var s) ? s.State : (byte)0;
+            if (have != pqState) return false;
+        }
+        // Date window / day-of-week (QuestDateCheck / QuestDayOfWeekCheck).
+        var now = DateTime.UtcNow;
+        if (r.StartDate is { } sd && now < sd) return false;
+        if (r.EndDate   is { } ed && now > ed) return false;
+        if (r.DayOfWeekMask != 0 && (r.DayOfWeekMask & (1 << (int)now.DayOfWeek)) == 0) return false;
+        return true;
+    }
+
+    // Lenient job gate (the server enforces the exact rule on accept): allow when the quest lists no
+    // job, lists "beginner" (0 — used by the many any-job quests), or shares the player's job branch.
+    private static bool JobAllowed(List<int> jobs, int jobId)
+    {
+        if (jobs.Count == 0) return true;
+        foreach (var j in jobs)
+            if (j == 0 || j == jobId || j / 100 == jobId / 100) return true;
+        return false;
+    }
+
+    // The quest-record value packs each complete-mob count as %03d (see Kinoko QuestInfo.progressQuest).
+    private static bool MobProgressMet(QuestReq complete, string value)
+    {
+        for (var i = 0; i < complete.Mobs.Count; i++)
+        {
+            var have = 0;
+            var off = i * 3;
+            if (value.Length >= off + 3 && int.TryParse(value.Substring(off, 3), out var n)) have = n;
+            if (have < complete.Mobs[i].Count) return false;
+        }
+        return true;
     }
 
     private void PopulateInventory(SetFieldArgs args)
@@ -1468,9 +1925,19 @@ public sealed class GameStage : Stage
         Game.Session.DrainQueue();   // dispatch all queued server packets on game thread
         var dt = (float)gameTime.ElapsedGameTime.TotalSeconds;
 
-        // Cursor shows the closed-hand "grab" sprite while an item (item- or equip-inventory) is held.
+        AdvanceFieldTransition(dt);   // map-change fade-to-black / swap-at-black / fade-in
+
+        // Cursor sprite priority:
+        //   ItemGrabbed (closed hand, variant 12) — something is on the cursor (mid-ghost-drag).
+        //   GrabReady   (open  hand, variant 5)  — hovering a grabbable inventory item, no click yet.
+        // Both ride on top of the regular Hover anim so the inventory grab indicator wins.
         if (Game.Cursor != null)
-            Game.Cursor.ItemGrabbed = _item?.IsDragging == true || _equip?.IsDragging == true;
+        {
+            Game.Cursor.ItemGrabbed = _item?.IsDragging == true || _equip?.IsDragging == true
+                || _skill?.IsDraggingSkill == true;
+            Game.Cursor.GrabReady = !Game.Cursor.ItemGrabbed
+                && ((_item?.HoverOverItem ?? false) || (_equip?.HoverOverItem ?? false));
+        }
 
         // Read held keys each frame (movement is frame-continuous).
         // Movement is driven by the live KeyConfig bindings so user rebinds
@@ -1497,6 +1964,10 @@ public sealed class GameStage : Stage
         if (_attackCooldown > 0f)
         {
             _attackCooldown -= dt;
+        }
+        if (_emotionCooldown > 0f)
+        {
+            _emotionCooldown -= dt;
         }
         // Held-key auto-repeat: holding the attack key re-swings once the per-attack delay has elapsed.
         // Game.IsActive gates the GetAsyncKeyState right-modifier check (R-Ctrl attack) to the focused window.
@@ -1530,7 +2001,9 @@ public sealed class GameStage : Stage
             }
             _camera.Target = _physics.Position;
 
-            if (_physics.TryFlushMovePath(out var blob))
+            // Suppress UserMove while a field transition is pending: the server has already
+            // moved us to the new field, so sending the old field's CRC would be rejected.
+            if (_pendingField is null && _physics.TryFlushMovePath(out var blob))
             {
                 SendUserMove(blob);
             }
@@ -1549,8 +2022,17 @@ public sealed class GameStage : Stage
         _camera.ViewHeight = camPp.BackBufferHeight;
         _camera.Update(dt);
 
-        // NPCs
-        foreach (var npc in _npcs) npc.Update(dt);
+        // NPCs — advance animation + ambient-speak timer; float any due chatter line.
+        foreach (var npc in _npcs)
+        {
+            npc.Update(dt);
+            if (npc.TakePendingSpeak() is { } line) _npcBalloons?.Set(npc.ObjId, line);
+        }
+        _npcBalloons?.Update(dt);
+
+        // Advance the shared quest-marker animation clock (~8 fps).
+        _markerTimer += dt;
+        if (_markerTimer >= 0.12f) { _markerTimer = 0f; _markerFrame++; }
 
         // Clickable-cursor feedback when the pointer is over an NPC (matches LoginStage's hover).
         var ms = Mouse.GetState();
@@ -1575,28 +2057,71 @@ public sealed class GameStage : Stage
             mob.Update(dt);
             if (mob.IsDead) deadMobs.Add(id);
         }
-        foreach (var id in deadMobs) _mobs.Remove(id);
+        foreach (var id in deadMobs) { _mobs.Remove(id); _mobCtl.Remove(id); _pendingCtrl.Remove(id); }
 
-        // TODO(wire-correctness): outgoing MobMove(227) is intentionally NOT
-        // sent yet. The upstream shape (per kinoko/handler/field/MobHandler.handleMobMove
-        // lines 48-98) is:
-        //   int dwMobID, short mobCtrlSn, byte actionMask, byte actionAndDir,
-        //   int targetInfo, int multiTargetForBall count + (int,int)*count,
-        //   int randTimeForAreaAttack count + int*count,
-        //   byte (bActive | 16*!cheatRand), int HackedCode,
-        //   int ptTarget.x, int ptTarget.y, int dwHackedCodeCRC,
-        //   <MovePath blob>,
-        //   byte bChasing, byte (pTarget!=0), byte pvcActive.bChasing,
-        //   byte pvcActive.bChasingHack, int pvcActive.tChaseDuration
-        // We don't currently run a mob-side physics simulation so we can't
-        // synthesise a legitimate MovePath. Surface a one-shot debug log
-        // rather than ship a malformed packet that would desync the IV chain.
-        if (Game.Session.IsConnected && _controlledMobs.Count > 0 && !_loggedMobMoveTodo)
+        // Controlled-mob AI + MobMove(227). The Kinoko server runs no mob AI of its own;
+        // the controller (= the nearest player, i.e. us) is the sole authority on each
+        // mob's movement and aggro. We drain _pendingCtrl first so MobChangeController
+        // packets that arrived during the fade-out window get their controllers built
+        // now that _field is loaded. See MobController for the per-moveAbility AI.
+        if (_field is not null && _physics is not null && Game.Session.IsConnected)
         {
-            _loggedMobMoveTodo = true;
-            _logger.LogDebug(
-                "MobMove(227) outbound is suppressed — wire shape (mobCtrlSn + HackedCode + MovePath + tail) " +
-                "is not yet implemented; controlled mobs will appear frozen to other clients until this is fixed.");
+            if (_pendingCtrl.Count > 0)
+            {
+                var pending = _pendingCtrl.ToArray();
+                _pendingCtrl.Clear();
+                foreach (var id in pending) TryCreateMobController(id);
+            }
+            var playerPos = _physics.Position;
+            if (_userHitCooldown > 0) _userHitCooldown -= dt;
+            foreach (var (mobId, ctl) in _mobCtl)
+            {
+                if (!ctl.ShouldTick) continue;   // STAY mobs (moveAbility 0) never emit
+                ctl.Update(dt, playerPos);
+                if (ctl.TryFlush(out var blob, out var sn))
+                {
+                    Game.Session.Send(GameSender.MobMove(
+                        mobId, sn, (byte)ctl.CurrentAction, ctl.FacingLeft,
+                        blob, chasing: ctl.IsChasing));
+                }
+                // Touch-damage ("mob attacks back"): when an aggressive mob with bodyAttack
+                // overlaps the player AABB and our i-frame is open, send UserHit(52). The
+                // server validates against the mob's MobAttack(0) template + broadcasts; we
+                // apply HP locally for instant feedback (StatChanged corrects it shortly).
+                // Full mob-skill attacks (MobSkill -> Disease) are deferred.
+                // Touch-damage with real knockback. Gates:
+                //   - global player i-frame (_userHitCooldown, 1 s for GMS feel)
+                //   - per-mob hit cooldown (ctl.CanHitPlayer, 2 s per IDB)
+                //   - mob must be aggressive AND have info/bodyAttack
+                //   - AABB overlap (35 px × 60 px around player)
+                // On hit we push the player AWAY from the mob via PlayerController.ApplyKnockback
+                // (raw velocity per IDB SetImpactNext — no fixed-strength constant; just (vx,vy)),
+                // send UserHit with knockback=2 so the server broadcasts the knockback to other
+                // players, apply HP locally for instant feedback (server's StatChanged corrects
+                // shortly), and start both cooldowns. Full mob-skill attacks (MobSkill → Disease)
+                // remain deferred.
+                if (_userHitCooldown <= 0f && ctl.CanHitPlayer && ctl.IsAggressive
+                    && ctl.Info.BodyAttack && _mobs.TryGetValue(mobId, out var mobLook))
+                {
+                    var mp = mobLook.Position;
+                    if (Math.Abs(mp.X - playerPos.X) < 35f && Math.Abs(mp.Y - playerPos.Y) < 60f)
+                    {
+                        var dmg     = Math.Max(1, ctl.Info.Level * 3);
+                        var pushDir = playerPos.X >= mp.X ? +1f : -1f;
+                        // Tuned to a small "snail-touch" hop; bigger mobs can scale vx by level later.
+                        _physics.ApplyKnockback(vx: pushDir * 130f, vy: -260f);
+                        var dir     = (byte)(mp.X < playerPos.X ? 0 : 1);
+                        Game.Session.Send(GameSender.UserHit(
+                            attackIndex: 0, magicElemAttr: 0,
+                            damage: dmg, templateId: mobLook.TemplateId, mobId: mobId,
+                            dir: dir, knockback: 2));
+                        if (_charStats is not null)
+                            _charStats.Hp = Math.Max(0, _charStats.Hp - dmg);
+                        _userHitCooldown = 1.0f;      // player-global i-frame (GMS ≈ 1 s)
+                        ctl.NotePlayerHit();          // per-mob cooldown (IDB: 2 s)
+                    }
+                }
+            }
         }
 
         // Map animation + background autoscroll
@@ -1615,6 +2140,9 @@ public sealed class GameStage : Stage
 
         // Damage numbers
         _dmgNumbers?.Update(dt);
+
+        // Over-head emotion bubbles
+        _emotionBubble?.Update(dt);
 
         // Sync stats to panels
         if (_statusBar != null)
@@ -1644,8 +2172,33 @@ public sealed class GameStage : Stage
         if (_statDetail is { IsVisible: true } && _stats != null)
             _statDetail.Position = _stats.Position + new Vector2(172, 90);
 
+        // QuestDetail rides off the right edge of the QuestLog; hide if the list closes.
+        if (_questDetail != null && _quest != null)
+        {
+            _questDetail.AnchorTopLeft = _quest.Position + new Vector2(_quest.OuterWidth, 0);
+            if (!_quest.IsVisible) _questDetail.IsVisible = false;
+        }
+
         // Panels
         foreach (var p in _panels) p.Update(gameTime);
+
+        // Swap in the vertical-resize cursor while the mouse is over the chat log's drag grip.
+        // Use the animated variant 7 on hover, then the static variant 9 once a drag actually
+        // begins — matches the v95 client's cursor swap.
+        if (Game.Cursor != null)
+        {
+            Game.Cursor.Resize         = _chatBar?.IsOverResizeGrip == true;
+            Game.Cursor.ResizeDragging = _chatBar?.IsDragGripActive == true;
+        }
+
+        // Advance + retire one-shot skill effect animations.
+        var fxDt = gameTime.ElapsedGameTime.TotalMilliseconds;
+        for (var i = _skillEffects.Count - 1; i >= 0; i--)
+        {
+            _skillEffects[i].Anim.Update(fxDt);
+            _skillEffects[i].Elapsed += fxDt;
+            if (_skillEffects[i].Elapsed >= _skillEffects[i].Anim.TotalDurationMs) _skillEffects.RemoveAt(i);
+        }
         _quitConfirm?.Update(gameTime);
         _gameMenu?.Update(gameTime);
     }
@@ -1669,12 +2222,16 @@ public sealed class GameStage : Stage
             DrawGroundPlane(sb, w, h);
         }
 
-        // NPCs (world-space → screen)
+        // NPCs (world-space → screen) + any quest marker floating above the head.
         foreach (var npc in _npcs)
         {
             var sp = _camera.WorldToScreen(npc.Position);
-            if (sp.X > -100 && sp.X < w + 100)
-                npc.Draw(sb, Game.WhitePixel, sp);
+            if (sp.X <= -100 || sp.X >= w + 100) continue;
+            npc.Draw(sb, Game.WhitePixel, sp);
+            var marker = MarkerFramesFor(npc.NpcId);
+            if (marker.Length > 0)
+                marker[_markerFrame % marker.Length]
+                    .Draw(sb, new Vector2(sp.X, sp.Y - npc.HeadOffset - 18));   // QuestIcon origin is centred
         }
 
         // Drops
@@ -1690,7 +2247,20 @@ public sealed class GameStage : Stage
         {
             var ms = _camera.WorldToScreen(mob.Position);
             if (ms.X > -80 && ms.X < w + 80)
+            {
                 mob.Draw(sb, Game.WhitePixel, ms);
+                // "{Name} (Lv. N)" tag below the mob for ~5 s after each hit — driven by
+                // MobLook's HitTagVisible timer (pulsed by OnHit + SetHpPercent).
+                if (mob.HitTagVisible && Game.Font != null && mob.NameTagText.Length > 0)
+                {
+                    var tag = mob.NameTagText;
+                    var sz  = Game.Font.Measure(tag);
+                    var tx  = ms.X - sz.X / 2f;
+                    var ty  = ms.Y + 6f;
+                    Game.Font.Draw(sb, tag, new Vector2(tx + 1f, ty + 1f), new Color(0, 0, 0, 200));
+                    Game.Font.Draw(sb, tag, new Vector2(tx,      ty),      Color.White);
+                }
+            }
         }
 
         // Other players
@@ -1706,6 +2276,24 @@ public sealed class GameStage : Stage
         {
             var playerScreen = _camera.WorldToScreen(_player.Position);
             _player.Draw(sb, Game.WhitePixel, playerScreen);
+
+            // Local-player name tag — drawn under the avatar's foot point
+            // (authentic v95 placement). Style matches OtherCharLook.
+            if (Game.Font is { } nameFont && !string.IsNullOrEmpty(_myName))
+            {
+                var tag = $"[{_charStats.Level}] {_myName}";
+                var sz  = nameFont.Measure(tag);
+                var tx  = playerScreen.X - sz.X / 2f;
+                var ty  = playerScreen.Y + 4f;
+                var bg  = new Rectangle((int)tx - 2, (int)ty - 1,
+                                        (int)sz.X + 4, nameFont.LineHeight + 2);
+                sb.Draw(Game.WhitePixel, bg, new Color(0, 0, 0, 160));
+                nameFont.Draw(sb, tag, new Vector2(tx, ty), new Color(255, 230, 100));
+            }
+
+            foreach (var fx in _skillEffects)
+                if (!fx.Screen)
+                    fx.Anim.Draw(sb, playerScreen, fx.Flip ? SpriteEffects.FlipHorizontally : SpriteEffects.None);
         }
 
         // Chat balloons above the speakers (arrow tip just above each head).
@@ -1718,6 +2306,17 @@ public sealed class GameStage : Stage
             return (Vector2?)null;
         });
 
+        // Ambient NPC speech balloons (arrow tip just above each NPC's head).
+        _npcBalloons?.Draw(sb, id =>
+        {
+            var npc = _npcs.FirstOrDefault(n => n.ObjId == id);
+            if (npc is null) return null;
+            return _camera.WorldToScreen(npc.Position) - new Vector2(0, npc.HeadOffset + 4);
+        });
+
+        // Over-head emotion bubbles (z=3 in the v95 client — above the avatar layer).
+        _emotionBubble?.Draw(sb, _camera.WorldToScreen);
+
         // Damage numbers (drawn on top of everything)
         _dmgNumbers?.Draw(sb, Game.WhitePixel, _camera.WorldToScreen);
 
@@ -1728,6 +2327,23 @@ public sealed class GameStage : Stage
         // System menu draws above the panels; the quit confirm sits above the menu.
         _gameMenu?.Draw(sb, Game.WhitePixel);
         _quitConfirm?.Draw(sb, Game.WhitePixel);
+
+        // Fullscreen skill effects (e.g. screen flash), centered, above the world + panels.
+        foreach (var fx in _skillEffects)
+            if (fx.Screen)
+                fx.Anim.Draw(sb, new Vector2(w / 2f, h / 2f));
+
+        // Skill drag ghost (above all panels): a skill picked up to bind onto a key/quickslot.
+        if (_skill?.IsDraggingSkill == true && _skill.DragIcon is { } skGhost)
+        {
+            var gm = Mouse.GetState();
+            skGhost.Draw(sb, new Vector2(gm.X, gm.Y) + skGhost.Origin - new Vector2(16, 16));
+        }
+
+        // Map-change transition: full-screen black fade, above the world + all panels.
+        if (_fadeAlpha > 0f)
+            sb.Draw(Game.WhitePixel, new Rectangle(0, 0, w, h),
+                new Color(0, 0, 0, (int)(_fadeAlpha * 255f)));
     }
 
     private void DrawGroundPlane(SpriteBatch sb, int w, int h)
@@ -1760,17 +2376,57 @@ public sealed class GameStage : Stage
             _equip.ResolveDrop(x, y, _item?.ContainsPoint(x, y) == true);
             return;
         }
+        // A skill held on the cursor (picked up from the Skill window): a click binds it to
+        // the key/quickslot under the cursor. Otherwise it falls through to the Skill window,
+        // which casts (quick re-click on the same row) or cancels.
+        if (down && _skill?.IsDraggingSkill == true)
+        {
+            if (_keyConfig?.IsVisible == true && _keyConfig.TryBindSkillAt(_skill.DragSkillId, x, y))
+            { _skill.CancelSkillDrag(); return; }
+            if (_quickSlots?.TryBindSkillAt(_skill.DragSkillId, x, y) == true)
+            { _skill.CancelSkillDrag(); return; }
+        }
         for (var i = _panels.Count - 1; i >= 0; i--)
         {
             var p = _panels[i];
             if (p.IsVisible && p.HandleMouseButton(x, y, down)) return;
         }
-        // NPC click-to-talk — only when no dialog is already open
+        // Double-click a player (yourself or another) → open the character profile. Your own profile
+        // uses local data; another player round-trips through the server (UserCharacterInfoRequest →
+        // CharacterInfo). Consume the click so it can't fall through to an NPC behind the avatar.
+        if (down)
+        {
+            var hitId = HitTestPlayer(x, y);
+            if (hitId != int.MinValue)
+            {
+                var now = Environment.TickCount64 / 1000.0;
+                if (hitId == _lastClickCharId && now - _lastClickTime < 0.4)
+                {
+                    if (hitId == Game.CharacterId) ShowOwnProfile();
+                    else SendIfConnected(GameSender.UserCharacterInfoRequest(hitId));
+                    _lastClickCharId = -1;
+                }
+                else { _lastClickCharId = hitId; _lastClickTime = now; }
+                return;
+            }
+        }
+        // NPC click — only when no dialog is already open. The floating quest marker is clickable too;
+        // it always opens the quest flow (even for NPCs that run a general script on a body click).
         if (down && _npcTalk?.IsVisible != true)
         {
+            var qpos = _physics?.Position ?? _player?.Position ?? Vector2.Zero;
             foreach (var npc in _npcs)
             {
                 var sp = _camera.WorldToScreen(npc.Position);
+                if (MarkerFramesFor(npc.NpcId).Length > 0)
+                {
+                    var mr = new Rectangle((int)sp.X - 22, (int)(sp.Y - npc.HeadOffset - 18) - 22, 44, 44);
+                    if (mr.Contains(x, y))
+                    {
+                        if (Game.Session.IsConnected) TryStartQuestInteraction(npc, qpos);
+                        break;
+                    }
+                }
                 if (npc.GetScreenBounds(sp).Contains(x, y))
                 {
                     SelectNpc(npc);
@@ -1780,17 +2436,130 @@ public sealed class GameStage : Stage
         }
     }
 
-    /// <summary>Send UserSelectNpc with the player's current position (the
-    /// server reads it). Shared by click-to-talk and the Interact key.</summary>
+    /// <summary>Hit-test the field avatars at a screen point: returns the char id of the player under
+    /// the cursor (another player, or yourself keyed by <c>Game.CharacterId</c>), or
+    /// <see cref="int.MinValue"/> if none. Drives the double-click → character-profile gesture.</summary>
+    private int HitTestPlayer(int x, int y)
+    {
+        foreach (var (id, oc) in _otherChars)
+        {
+            if (oc.GetScreenBounds(_camera.WorldToScreen(oc.Position)).Contains(x, y)) return id;
+        }
+        var me = _camera.WorldToScreen(_physics?.Position ?? _player?.Position ?? Vector2.Zero);
+        var selfBox = new Rectangle((int)me.X - 18, (int)me.Y - 84, 36, 90);
+        if (selfBox.Contains(x, y)) return Game.CharacterId;
+        return int.MinValue;
+    }
+
+    /// <summary>Open your own profile in the UserInfo window (status bar / CharInfo key / double-click
+    /// yourself). Re-applies your current snapshot + avatar every time, so a prior other-player view
+    /// never leaves a stale name/avatar behind.</summary>
+    private void ShowOwnProfile()
+    {
+        if (_charInfo == null) return;
+        _charInfo.ShowProfile(_myName, _charStats.Level, JobName(_charStats.JobId), _charStats.Fame,
+            _charStats.Guild, string.Empty, _charRenderer, _myLook, null);
+    }
+
+    private void ToggleOwnProfile()
+    {
+        if (_charInfo == null) return;
+        if (_charInfo.IsVisible) _charInfo.IsVisible = false;
+        else ShowOwnProfile();
+    }
+
+    /// <summary>Click / Interact-key on an NPC. A scripted NPC goes through UserSelectNpc (the server
+    /// runs its info/script). A pure quest NPC has no script, so UserSelectNpc would do nothing —
+    /// route it through the quest packet instead. Shared by click-to-talk and the Interact key.</summary>
     private void SelectNpc(NpcLook npc)
     {
-        if (!Game.Session.IsConnected)
-        {
-            return;
-        }
+        if (!Game.Session.IsConnected) return;
         var pos = _physics?.Position ?? _player?.Position ?? Vector2.Zero;
+        if (!npc.HasScript && TryStartQuestInteraction(npc, pos)) return;
         Game.Session.Send(GameSender.UserSelectNpc(npc.ObjId, (short)pos.X, (short)pos.Y));
     }
+
+    /// <summary>If the NPC has quests we can act on, open them (act directly for one, show a menu for
+    /// several) and return true. Used by clicking a pure-quest NPC and by clicking its floating marker.
+    /// The selected quest's q{id}s/q{id}e script then drives the dialog through the normal ScriptMessage
+    /// path; the server re-validates startability/completability.</summary>
+    private bool TryStartQuestInteraction(NpcLook npc, Vector2 pos)
+    {
+        var actions = QuestActionsAtNpc(npc.NpcId);
+        if (actions.Count == 0) return false;
+        if (actions.Count == 1) SendQuestScript(actions[0].Id, actions[0].Complete, npc, pos);
+        else                    ShowQuestMenu(npc, actions, pos);
+        return true;
+    }
+
+    // Quests this NPC can start (Complete=false) or complete now (Complete=true), for the player's state.
+    private List<(int Id, bool Complete)> QuestActionsAtNpc(int npcTemplateId)
+    {
+        var actions = new List<(int, bool)>();
+        var level = _charStats.Level;
+        var job = _charStats.JobId;
+        foreach (var (qid, isStart) in Game.Quests.ForNpc(npcTemplateId))
+        {
+            var q = Game.Quests.Get(qid);
+            if (q is null) continue;
+            if (isStart) { if (CanStartQuest(q, level, job)) actions.Add((qid, false)); }
+            else         { if (CanCompleteQuest(q, level, job)) actions.Add((qid, true)); }
+        }
+        actions.Sort((a, b) => b.Item2.CompareTo(a.Item2));   // ready turn-ins first
+        return actions;
+    }
+
+    // A client-local quest picker reusing the authentic CUtilDlgEx menu (inline #L# links). Picking an
+    // entry sends the quest script request; the server's reply re-drives _npcTalk via ScriptMessage.
+    private void ShowQuestMenu(NpcLook npc, List<(int Id, bool Complete)> actions, Vector2 pos)
+    {
+        if (_npcTalk is null) return;
+        var lines = new List<string> { "#e#bSelect a quest:#k#n", "" };
+        for (var i = 0; i < actions.Count; i++)
+            lines.Add($"#L{i}#{(actions[i].Complete ? "(Complete) " : "(Start) ")}{QuestDisplayName(actions[i].Id)}#l");
+        _npcTalk.ShowMenu(npc.NpcId, 0, string.Join("\r\n", lines));
+        _npcTalk.OnMenuChoice = choice =>
+        {
+            if (choice >= 0 && choice < actions.Count)
+                SendQuestScript(actions[choice].Id, actions[choice].Complete, npc, pos);
+        };
+        _npcTalk.OnClose = () => { };   // client-local menu — nothing to tell the server
+    }
+
+    private void SendQuestScript(int questId, bool complete, NpcLook npc, Vector2 pos)
+    {
+        if (!Game.Session.IsConnected) return;
+        Game.Session.Send(complete
+            ? GameSender.QuestCompleteScript((short)questId, npc.NpcId, (short)pos.X, (short)pos.Y)
+            : GameSender.QuestStartScript((short)questId, npc.NpcId, (short)pos.X, (short)pos.Y));
+    }
+
+    private string QuestDisplayName(int id)
+    {
+        var q = Game.Quests.Get(id);
+        return q is { Name.Length: > 0 } ? q.Name : (Game.Names.QuestName(id) ?? $"Quest {id}");
+    }
+
+    /// <summary>Load the animation frames of a UI.wz/UIWindow2.img/QuestIcon group (the NPC head markers).</summary>
+    private WzSprite[] LoadQuestIcon(int group)
+    {
+        if (_loader is null || _ui?.GetItem($"UIWindow2.img/QuestIcon/{group}") is not WzProperty node)
+            return [];
+        var frames = new List<WzSprite>();
+        for (var i = 0; node.Get(i.ToString()) is WzCanvas c; i++)
+            if (_loader.Load(c) is { } sprite) frames.Add(sprite);
+        return frames.ToArray();
+    }
+
+    private WzSprite[] MarkerFramesFor(int npcTemplateId) =>
+        _npcMarkers.TryGetValue(npcTemplateId, out var kind)
+            ? kind switch
+            {
+                QuestMarkerKind.New        => _questMarkNew,
+                QuestMarkerKind.InProgress => _questMarkProgress,
+                _ => [],
+            }
+            : [];
 
     private const float NpcInteractRange = 80f;
 
@@ -1874,7 +2643,7 @@ public sealed class GameStage : Stage
                 return;
             }
             SendIfConnected(GameSender.GroupChat(GameSender.ChatGroupType.Party, _partyMemberIds, partyRest));
-            _chatBar?.AddLine($"[Party] {_myName} : {partyRest}", GroupColor((int)GameSender.ChatGroupType.Party));
+            _chatBar?.AddLine($"[Party] {_myName} : {partyRest}", GroupColor((int)GameSender.ChatGroupType.Party), ChatBar.ChatLineType.Party);
             return;
         }
 
@@ -1882,7 +2651,7 @@ public sealed class GameStage : Stage
         {
             if (_buddyIds.Count == 0) { _chatBar?.AddLine("No buddies are online.", new Color(220, 120, 120)); return; }
             SendIfConnected(GameSender.GroupChat(GameSender.ChatGroupType.Friend, _buddyIds, buddyRest));
-            _chatBar?.AddLine($"[Buddy] {_myName} : {buddyRest}", GroupColor((int)GameSender.ChatGroupType.Friend));
+            _chatBar?.AddLine($"[Buddy] {_myName} : {buddyRest}", GroupColor((int)GameSender.ChatGroupType.Friend), ChatBar.ChatLineType.Buddy);
             return;
         }
 
@@ -1890,7 +2659,7 @@ public sealed class GameStage : Stage
         {
             if (_guildMemberIds.Count == 0) { _chatBar?.AddLine("You are not in a guild.", new Color(220, 120, 120)); return; }
             SendIfConnected(GameSender.GroupChat(GameSender.ChatGroupType.Guild, _guildMemberIds, guildRest));
-            _chatBar?.AddLine($"[Guild] {_myName} : {guildRest}", GroupColor((int)GameSender.ChatGroupType.Guild));
+            _chatBar?.AddLine($"[Guild] {_myName} : {guildRest}", GroupColor((int)GameSender.ChatGroupType.Guild), ChatBar.ChatLineType.Guild);
             return;
         }
 
@@ -1898,7 +2667,7 @@ public sealed class GameStage : Stage
         {
             // Alliance relays via the guild roster we know (full alliance-member decode is a follow-up).
             SendIfConnected(GameSender.GroupChat(GameSender.ChatGroupType.Alliance, _guildMemberIds, allyRest));
-            _chatBar?.AddLine($"[Alliance] {_myName} : {allyRest}", GroupColor((int)GameSender.ChatGroupType.Alliance));
+            _chatBar?.AddLine($"[Alliance] {_myName} : {allyRest}", GroupColor((int)GameSender.ChatGroupType.Alliance), ChatBar.ChatLineType.Alliance);
             return;
         }
 
@@ -2004,8 +2773,38 @@ public sealed class GameStage : Stage
             return;
         }
 
-        // Plain map chat.
-        SendIfConnected(GameSender.UserChat(line));
+        // No slash command → route to the chat-target dropup's current selection.
+        // All = ordinary map chat (the server echoes it back to us, so no local echo);
+        // the group targets broadcast to the roster we know and echo locally.
+        switch (_chatBar?.Target ?? ChatBar.ChatTargetKind.All)
+        {
+            case ChatBar.ChatTargetKind.Buddy:
+                if (_buddyIds.Count == 0) { _chatBar?.AddLine("No buddies are online.", new Color(220, 120, 120)); return; }
+                SendIfConnected(GameSender.GroupChat(GameSender.ChatGroupType.Friend, _buddyIds, line));
+                _chatBar?.AddLine($"[Buddy] {_myName} : {line}", GroupColor(0), ChatBar.ChatLineType.Buddy);
+                return;
+            case ChatBar.ChatTargetKind.Party:
+                if (_partyMemberIds.Count == 0) { _chatBar?.AddLine("You are not in a party.", new Color(220, 120, 120)); return; }
+                SendIfConnected(GameSender.GroupChat(GameSender.ChatGroupType.Party, _partyMemberIds, line));
+                _chatBar?.AddLine($"[Party] {_myName} : {line}", GroupColor(1), ChatBar.ChatLineType.Party);
+                return;
+            case ChatBar.ChatTargetKind.Guild:
+                if (_guildMemberIds.Count == 0) { _chatBar?.AddLine("You are not in a guild.", new Color(220, 120, 120)); return; }
+                SendIfConnected(GameSender.GroupChat(GameSender.ChatGroupType.Guild, _guildMemberIds, line));
+                _chatBar?.AddLine($"[Guild] {_myName} : {line}", GroupColor(2), ChatBar.ChatLineType.Guild);
+                return;
+            case ChatBar.ChatTargetKind.Alliance:
+                SendIfConnected(GameSender.GroupChat(GameSender.ChatGroupType.Alliance, _guildMemberIds, line));
+                _chatBar?.AddLine($"[Alliance] {_myName} : {line}", GroupColor(3), ChatBar.ChatLineType.Alliance);
+                return;
+            case ChatBar.ChatTargetKind.Expedition:
+                // We don't track an expedition roster yet, so we can't address the broadcast.
+                _chatBar?.AddLine("Expedition chat is unavailable.", new Color(220, 120, 120));
+                return;
+            default:
+                SendIfConnected(GameSender.UserChat(line));
+                return;
+        }
     }
 
     // Returns true and the remainder (trimmed of the prefix) when line starts
@@ -2028,13 +2827,14 @@ public sealed class GameStage : Stage
         return sp < 0 ? (s, string.Empty) : (s[..sp], s[(sp + 1)..].Trim());
     }
 
-    // ChatGroupType → display prefix / colour. 0=Buddy 1=Party 2=Guild 3=Alliance.
+    // ChatGroupType → display prefix / colour. 0=Buddy 1=Party 2=Guild 3=Alliance 6=Expedition.
     private static string GroupPrefix(int groupType) => groupType switch
     {
         0 => "Buddy",
         1 => "Party",
         2 => "Guild",
         3 => "Alliance",
+        6 => "Expedition",
         _ => "Group",
     };
 
@@ -2044,7 +2844,19 @@ public sealed class GameStage : Stage
         1 => new Color(120, 220, 160),   // party — green
         2 => new Color(220, 200, 120),   // guild — gold
         3 => new Color(200, 160, 220),   // alliance — purple
+        6 => new Color(230, 170, 90),    // expedition — orange
         _ => Color.White,
+    };
+
+    // Incoming group-chat type → ChatBar filter channel (drives the tab filtering).
+    private static ChatBar.ChatLineType GroupLineType(int groupType) => groupType switch
+    {
+        0 => ChatBar.ChatLineType.Buddy,
+        1 => ChatBar.ChatLineType.Party,
+        2 => ChatBar.ChatLineType.Guild,
+        3 => ChatBar.ChatLineType.Alliance,
+        6 => ChatBar.ChatLineType.Expedition,
+        _ => ChatBar.ChatLineType.Normal,
     };
 
     public override void OnTextInput(char ch)
@@ -2105,9 +2917,38 @@ public sealed class GameStage : Stage
             case FuncKeyType.BasicAction:
                 DispatchAction((KeyConfig.KeyAction)fk.Id);
                 break;
-            // Faces (BasicMotion/Emotion) and macros are stored/shown/draggable but
-            // firing them is a follow-up (UserEmotion / macro execution).
+            case FuncKeyType.Emotion:
+            case FuncKeyType.BasicMotion:
+                // The bound id is the face palette slot 100..106 (default F1..F7) or any other
+                // emotion id; the wire value the server reads is (id - 99) → 1..23 per the v95
+                // client's CWvsContext::SendEmotionChange (CUserLocal::UseFuncKeyMapped case 6).
+                TriggerEmotion(fk.Id - 99);
+                break;
+            // Macros are stored/shown/draggable but firing them is a follow-up.
         }
+    }
+
+    // Send a face emotion (F1..F7 via the default keymap, or any drag-bound emotion icon).
+    // Mirrors the v95 client's CWvsContext::SendEmotionChange ordering: apply locally first
+    // (the avatar reacts even if the packet is dropped), then send. A 2 s cooldown matches
+    // the v95 client's own guard between successive sends.
+    private void TriggerEmotion(int emotion)
+    {
+        if (_player is null) return;
+        if (emotion is < 0 or > 23) return;
+        if (_emotionCooldown > 0f) return;
+        // TODO(morph): block when morphed once we model that. v95 client's
+        // CWvsContext::SendEmotionChange returns early when CAvatar::IsMorphed().
+
+        _player.SetEmotion(emotion, durationMs: -1);
+        if (emotion > 0)
+        {
+            var pos = _physics?.Position ?? _player.Position;
+            _emotionBubble?.Add(emotion, pos - new Vector2(0, 60));
+        }
+        if (Game.Session.IsConnected)
+            Game.Session.Send(GameSender.UserEmotion(emotion));
+        _emotionCooldown = EmotionCooldownSeconds;
     }
 
     private void UseItemById(int itemId)
@@ -2131,7 +2972,7 @@ public sealed class GameStage : Stage
             case KeyConfig.KeyAction.MiniMap:        _miniMap!.CycleMode();                                  break;
             case KeyConfig.KeyAction.WorldMap:       _worldMap!.IsVisible      = !_worldMap.IsVisible;       break;
             case KeyConfig.KeyAction.KeyBindings:    _keyConfig!.IsVisible     = !_keyConfig.IsVisible;      break;
-            case KeyConfig.KeyAction.CharInfo:       _charInfo!.IsVisible      = !_charInfo.IsVisible;       break;
+            case KeyConfig.KeyAction.CharInfo:       ToggleOwnProfile();       break;
             case KeyConfig.KeyAction.Family:         _familyWindow!.IsVisible  = !_familyWindow.IsVisible;   break;
             case KeyConfig.KeyAction.ChangeChannel:  _channelSelect!.IsVisible = !_channelSelect.IsVisible;  break;
             case KeyConfig.KeyAction.Menu:           _optionMenu!.IsVisible    = !_optionMenu.IsVisible;     break;
@@ -2145,7 +2986,7 @@ public sealed class GameStage : Stage
             // Chat
             case KeyConfig.KeyAction.Say:
             case KeyConfig.KeyAction.ToggleChat:
-            case KeyConfig.KeyAction.MapleChat:      _chatBar!.IsVisible       = !_chatBar.IsVisible;        break;
+            case KeyConfig.KeyAction.MapleChat:      _chatBar!.ToggleMode();                                  break;
             // Cash Shop — request migration (same connection: server replies with
             // SetCashShop on this socket), then open the local shell.
             case KeyConfig.KeyAction.CashShop:
@@ -2220,15 +3061,13 @@ public sealed class GameStage : Stage
             _statusBar.Mp       = stats.Mp;   _statusBar.MaxMp = stats.MaxMp;
             _statusBar.Exp      = stats.Exp;
         }
-        if (_charInfo != null)
+        // CharInfo is not pushed here: it's repopulated from _charStats + _myLook each time you open
+        // your own profile (ShowOwnProfile), so a stat tick can't corrupt another player's profile view.
+        if (_skill != null)
         {
-            _charInfo.CharName = _myName;
-            _charInfo.Level    = stats.Level;
-            _charInfo.Job      = JobName(stats.JobId);
-            _charInfo.Fame     = stats.Fame;
-            _charInfo.Guild    = stats.Guild;
+            _skill.SP = stats.SP;
+            SetSkillJob(stats.JobId);
         }
-        if (_skill != null) _skill.SP = stats.SP;
         // Feed the player's requirement stats to the item tooltips (unmet reqs show red).
         _item?.SetPlayerStats(stats.Level, stats.Str, stats.Dex, stats.Int, stats.Luk, stats.JobId);
         _equip?.SetPlayerStats(stats.Level, stats.Str, stats.Dex, stats.Int, stats.Luk, stats.JobId);
@@ -2328,6 +3167,19 @@ public sealed class GameStage : Stage
                 Delay = 0,
                 Damage = new[] { dmg },
             });
+
+            // Local hit feedback - the server only echoes MobHPIndicator(298) back to the
+            // attacker (no MobDamaged broadcast to the hitter), so the hit anim / damage
+            // number / aggro flip / mob knockback are all driven locally from here.
+            mob.OnHit(dmg);
+            _dmgNumbers?.Add(dmg, mob.Position, DamageNumber.Kind.MobDamage);
+            if (_mobCtl.TryGetValue(mob.MobId, out var hitCtl))
+            {
+                hitCtl.OnDamagedByPlayer();
+                var pushDir = mob.Position.X >= pos.X ? +1f : -1f;
+                hitCtl.ApplyHitKnockback(pushDir * 25f);
+            }
+
             if (targets.Count >= MaxMeleeTargets)
             {
                 break;
@@ -2366,7 +3218,24 @@ public sealed class GameStage : Stage
     {
         var npc = new NpcLook(id, worldPos, Game.Font) { Name = name };
         npc.Load(_loader!, _npcWz);
+        AttachAmbientSpeak(npc, id);
         _npcs.Add(npc);
+    }
+
+    /// <summary>Resolve an NPC's <c>info/speak</c> keys to text (String.wz/Npc.img) and attach them so
+    /// it floats random ambient lines in a chat balloon. NPCs without a speak node stay silent.</summary>
+    private void AttachAmbientSpeak(NpcLook npc, int templateId)
+    {
+        if (npc.SpeakKeys.Count == 0) return;
+        var name = npc.Name.Split(" : ")[0];
+        var lines = new List<string>();
+        foreach (var key in npc.SpeakKeys)
+        {
+            var line = Game.Names.NpcText(templateId, key);
+            if (!string.IsNullOrEmpty(line))
+                lines.Add(line.Replace("/name", name));
+        }
+        npc.SetAmbientSpeak(lines);
     }
 
 }

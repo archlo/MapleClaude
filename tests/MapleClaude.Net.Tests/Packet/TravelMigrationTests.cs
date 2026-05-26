@@ -58,7 +58,7 @@ public class TravelMigrationTests
         p.ReadShort().Should().Be((short)InHeader.UserTransferFieldRequest);
         p.ReadByte().Should().Be(2);            // fieldKey
         p.ReadInt().Should().Be(100000000);     // targetMap
-        p.ReadString().Should().Be("west00");   // destination portal
+        p.ReadString().Should().Be("west00");   // source portal name on current field
         p.ReadShort().Should().Be(250);         // x
         p.ReadShort().Should().Be(-120);        // y
         p.ReadByte().Should().Be(0);            // unused

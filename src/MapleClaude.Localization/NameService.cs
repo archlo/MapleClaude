@@ -32,6 +32,7 @@ public sealed class NameService
     private Dictionary<int, string>? _maps;
     private Dictionary<int, string>? _mobs;
     private Dictionary<int, string>? _npcs;
+    private Dictionary<int, Dictionary<string, string>>? _npcStrings;
     private Dictionary<int, string>? _skills;
 
     public NameService(Func<WzPackage?> stringWzProvider, ILogger? logger = null,
@@ -51,6 +52,10 @@ public sealed class NameService
     public string? NpcName(int id)   => Npcs().GetValueOrDefault(id);
     public string? QuestName(int id) => Quests().GetValueOrDefault(id);
 
+    /// <summary>A single String.wz/Npc.img/&lt;id&gt;/&lt;key&gt; string (e.g. an ambient-speak line
+    /// keyed "n0"/"s0"), or null. Used to resolve <see cref="MapleClaude.Wz"/> NPC <c>info/speak</c> keys.</summary>
+    public string? NpcText(int id, string key) => NpcStrings().GetValueOrDefault(id)?.GetValueOrDefault(key);
+
     // ── Lazy category loaders ───────────────────────────────────────────────────
 
     private Dictionary<int, string> Items()     => _items     ??= LoadItemStrings("name");
@@ -58,6 +63,7 @@ public sealed class NameService
     private Dictionary<int, string> Maps()   => _maps   ??= LoadMaps();
     private Dictionary<int, string> Mobs()   => _mobs   ??= LoadFlatImage("Mob.img");
     private Dictionary<int, string> Npcs()   => _npcs   ??= LoadNpcs();
+    private Dictionary<int, Dictionary<string, string>> NpcStrings() => _npcStrings ??= LoadNpcStrings();
     private Dictionary<int, string> Skills() => _skills ??= LoadSkills();
     private Dictionary<int, string> Quests() => _quests ??= LoadQuests();
 
@@ -153,6 +159,31 @@ public sealed class NameService
         catch (Exception ex)
         {
             _logger?.LogWarning(ex, "NameService: failed loading npc names");
+        }
+        return dict;
+    }
+
+    // String.wz/Npc.img/<id>/* — the full per-NPC string sub-table (name, func, d0…, n0…/s0…),
+    // cached so ambient-speak keys resolve without re-walking the WZ each tick.
+    private Dictionary<int, Dictionary<string, string>> LoadNpcStrings()
+    {
+        var dict = new Dictionary<int, Dictionary<string, string>>();
+        var wz = _stringWz();
+        if (wz?.GetItem("Npc.img") is not WzImage image) return dict;
+        try
+        {
+            foreach (var (key, val) in image.Root.Items)
+            {
+                if (!int.TryParse(key, out var id) || val is not WzProperty p) continue;
+                var sub = new Dictionary<string, string>();
+                foreach (var (k, v) in p.Items)
+                    if (v is string s) sub[k] = s;
+                if (sub.Count > 0) dict[id] = sub;
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger?.LogWarning(ex, "NameService: failed loading npc strings");
         }
         return dict;
     }

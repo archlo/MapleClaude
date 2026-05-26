@@ -129,6 +129,7 @@ public enum OutHeader : short
     RecommendWorldMessage = 25,
     CheckExtraCharInfoResult = 26,
     CheckSPWResult = 27,
+    CharacterInfo = 61,
     PartyResult = 62,
     FriendResult = 65,
     GuildResult = 67,
@@ -148,13 +149,24 @@ public enum OutHeader : short
     UserLeaveField = 180,
     UserChat = 181,
     UserMove = 210,
+    // A nearby player triggered an emotion (face expression) — UserRemote.emotion.
+    // Body: int charId, int emotion, int duration, byte byItemOption. Kinoko broadcasts
+    // to the field excluding the sender (UserHandler.handleUserEmotion); we apply the
+    // expression to the matching OtherCharLook and spawn the over-head bubble.
+    UserEmotion = 219,
     UserEffectRemote = 224,
+    // Self-echo of an emotion change. Vanilla Kinoko does NOT emit this in the
+    // FuncKey flow (handleUserEmotion only broadcasts UserRemote.emotion=219); the
+    // builder is defined in UserLocal.emotion for forked-server / item-bubble paths.
+    // Body: int emotion, int duration, byte byItemOption — no charId (the receiver IS the local player).
+    UserEmotionLocal = 232,
     UserEffectLocal = 233,
     MobEnterField = 284,
     MobLeaveField = 285,
     MobChangeController = 286,
     MobMove = 287,
     MobCtrlAck = 288,
+    MobHPIndicator = 298,
     MobDamaged = 294,
     NpcEnterField = 311,
     NpcLeaveField = 312,

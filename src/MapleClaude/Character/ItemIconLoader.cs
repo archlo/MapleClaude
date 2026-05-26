@@ -57,6 +57,22 @@ public sealed class ItemIconLoader
         return sprite;
     }
 
+    /// <summary>Pet icon from <c>Item.wz/Pet/&lt;id:D8&gt;.img/info/icon</c>. Pets live in their own
+    /// <c>Pet</c> folder (NOT under <c>Cash</c> where <see cref="LoadIcon"/> would route 5xxxxxx ids), so
+    /// the character-profile pet row needs this dedicated lookup. Cached per id (misses too).</summary>
+    public WzSprite? LoadPetIcon(int templateId)
+    {
+        if (_cache.TryGetValue(templateId, out var cached)) return cached;
+        WzSprite? sprite = null;
+        try
+        {
+            if (_itemWz is not null) sprite = Resolve(_itemWz, $"Pet/{templateId:D8}.img/info");
+        }
+        catch { sprite = null; }
+        _cache[templateId] = sprite;
+        return sprite;
+    }
+
     /// <summary>Parsed item attributes for the tooltip (requirements + bonuses), read from the
     /// item's <c>info</c> node. Equips → Character.wz; consumables/etc → Item.wz. Returns null when
     /// the item has no info node (caller shows just the name). Cached per id (misses too).</summary>

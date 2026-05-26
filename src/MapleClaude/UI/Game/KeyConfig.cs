@@ -125,6 +125,9 @@ public sealed class KeyConfig : GamePanel
     /// <summary>Open the QuickSlot key-config sub-panel (BtQuickSlot). Wired by the stage.</summary>
     public Action? OnOpenQuickSlot;
 
+    /// <summary>Resolves a skill's icon for bound keys (set by the stage from Game.Skills).</summary>
+    public Func<int, WzSprite?>? SkillIconResolver { get; set; }
+
     public KeyConfig(WzTextureLoader loader, WzPackage? ui, BuiltInFont? font)
     {
         _loader = loader;
@@ -359,6 +362,40 @@ public sealed class KeyConfig : GamePanel
         CancelDrag();
     }
 
+    /// <summary>The current binding for a scancode (read by the quick-slot bar to render its cells).</summary>
+    public FuncKeyMapped BindingAt(int scancode) =>
+        scancode >= 0 && scancode < MapSize ? _map[scancode] : FuncKeyMapped.None;
+
+    /// <summary>Bind a skill to a scancode and persist immediately. Used by the quick-slot bar,
+    /// which lives outside this window's OK/Cancel flow, so the change is saved + sent at once.</summary>
+    public void BindSkillToKey(int scancode, int skillId)
+    {
+        if (scancode < 0 || scancode >= MapSize) return;
+        var fk = new FuncKeyMapped(FuncKeyType.Skill, skillId);
+        var changed = new List<(int index, FuncKeyMapped fk)>();
+        for (var i = 0; i < MapSize; i++)
+            if (_map[i] == fk && i != scancode) { _map[i] = FuncKeyMapped.None; changed.Add((i, FuncKeyMapped.None)); }
+        _map[scancode] = fk;
+        changed.Add((scancode, fk));
+        Array.Copy(_map, _mapOnOpen, MapSize);   // keep the open-snapshot in sync so Cancel won't revert it
+        OnSaveToServer?.Invoke(changed);
+        OnBindingsChanged?.Invoke();
+    }
+
+    /// <summary>Bind a skill dragged in from the Skill window to the key under the cursor.
+    /// Returns true if a key cell was hit. Provisional until OK (same as other edits).</summary>
+    public bool TryBindSkillAt(int skillId, int screenX, int screenY)
+    {
+        if (!IsVisible) return false;
+        var sc = KeyConfigLayout.HitTestKey(screenX - (int)Position.X, screenY - (int)Position.Y);
+        if (sc < 0) return false;
+        var fk = new FuncKeyMapped(FuncKeyType.Skill, skillId);
+        for (var i = 0; i < MapSize; i++)   // a skill lives on exactly one key
+            if (_map[i] == fk) _map[i] = FuncKeyMapped.None;
+        _map[sc] = fk;
+        return true;
+    }
+
     // ── Draw ──────────────────────────────────────────────────────────────────────
 
     public override void Draw(SpriteBatch sb, Texture2D white)
@@ -479,7 +516,9 @@ public sealed class KeyConfig : GamePanel
     {
         if (fk.Type is FuncKeyType.Menu or FuncKeyType.BasicAction or FuncKeyType.BasicMotion or FuncKeyType.Emotion)
             return LoadIcon(fk.Id);
-        return null; // skill/item/macro icons: provider not wired here yet
+        if (fk.Type is FuncKeyType.Skill or FuncKeyType.MacroSkill)
+            return SkillIconResolver?.Invoke(fk.Id);
+        return null; // item icons: provider not wired here yet
     }
 
     private WzSprite? LoadIcon(int id)

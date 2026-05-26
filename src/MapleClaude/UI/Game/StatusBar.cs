@@ -36,7 +36,9 @@ public sealed class StatusBar : GamePanel
 
     // ── Static origin-baked sprites (all drawn at R) ────────────────────────────
     private readonly WzSprite? _backgrnd, _lvBacktrnd, _lvCover, _gaugeBackgrd, _gaugeCover, _notice;
-    private readonly WzSprite? _chatSpace, _chatSpace2, _chatEnter, _chatCover, _quickSlotPanel;
+    private readonly WzSprite? _quickSlotPanel;
+    // NOTE: the chat backgrounds (chatSpace/chatSpace2/chatEnter/chatCover) are owned by
+    // ChatBar now — it toggles them by chat mode (open vs collapsed), which the bar can't.
     // ── Gauge 3-slices ──────────────────────────────────────────────────────────
     private readonly WzSprite?[] _hp = new WzSprite?[3];
     private readonly WzSprite?[] _mp = new WzSprite?[3];
@@ -111,10 +113,6 @@ public sealed class StatusBar : GamePanel
         _gaugeBackgrd = Canvas(loader, bar, "gaugeBackgrd");
         _gaugeCover  = Canvas(loader, bar, "gaugeCover");
         _notice      = Canvas(loader, bar, "notice");
-        _chatSpace   = Canvas(loader, bar, "chatSpace");
-        _chatSpace2  = Canvas(loader, bar, "chatSpace2");
-        _chatEnter   = Canvas(loader, bar, "chatEnter");
-        _chatCover   = Canvas(loader, bar, "chatCover");
 
         // Gauges: 3-slice (0 = left cap, 1 = stretched centre, 2 = right cap).
         var gauge = bar?.Get("gauge") as WzProperty;
@@ -201,11 +199,10 @@ public sealed class StatusBar : GamePanel
     /// <summary>Top-left of the 1024×85 bar in screen space (for manual bar-relative placement).</summary>
     private Vector2 BarTopLeft => new(BarCenterX - 512, _viewH - BarH);
 
-    /// <summary>Screen rect of the chat input box (<c>chatEnter</c>) so the chat bar can place its input
-    /// line on it. Derived from the origin-baked WZ sprite; falls back to the bar's bottom-left.</summary>
-    public Rectangle ChatInputRect => _chatEnter is { } s
-        ? new Rectangle((int)(BarRef.X - s.Origin.X), (int)(BarRef.Y - s.Origin.Y), s.Width, s.Height)
-        : new Rectangle((int)BarTopLeft.X + 8, _viewH - 24, 480, 18);
+    /// <summary>The bar's window anchor (bottom-centre reference point R). Every baked-origin chat
+    /// sprite — owned by <see cref="ChatBar"/> — draws at this point and lands via <c>pos - origin</c>,
+    /// exactly like the gauges/buttons here. ChatBar uses it to place the dropup, input, tabs, etc.</summary>
+    public Vector2 ChatAnchor => BarRef;
 
     public override void Relayout(int viewWidth, int viewHeight)
     {
@@ -246,11 +243,8 @@ public sealed class StatusBar : GamePanel
             _backgrnd.Draw(sb, r);
         }
 
-        // Chat area backgrounds (the chat log/input/tabs land here in 23b).
-        _chatSpace?.Draw(sb, r);
-        _chatSpace2?.Draw(sb, r);
-        _chatEnter?.Draw(sb, r);
-        _chatCover?.Draw(sb, r);
+        // Chat backgrounds + interactive chat (dropup/tabs/log/input) are drawn by ChatBar,
+        // which sits after the bar in the panel list, so it layers on top of this background.
 
         // Level/name plate.
         _lvBacktrnd?.Draw(sb, r);

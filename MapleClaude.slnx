@@ -8,6 +8,7 @@
     <Project Path="src/MapleClaude/MapleClaude.csproj" />
   </Folder>
   <Folder Name="/tests/">
+    <Project Path="tests/MapleClaude.Domain.Tests/MapleClaude.Domain.Tests.csproj" />
     <Project Path="tests/MapleClaude.Net.Tests/MapleClaude.Net.Tests.csproj" />
     <Project Path="tests/MapleClaude.Wz.Tests/MapleClaude.Wz.Tests.csproj" />
   </Folder>

@@ -131,4 +131,34 @@ public class QuestTests
         p.ReadShort().Should().Be(2100);
         p.Remaining.Should().Be(0);
     }
+
+    // OpeningScript(4)/CompleteScript(5): how a quest NPC starts/completes a quest (the body-click
+    // path for NPCs with no general script + the floating quest-marker). Mirrors Kinoko
+    // UserHandler.handleUserQuestRequest: byte action, short questId, int npcTemplateId, short x, short y.
+
+    [Fact]
+    public void QuestStartScript_Encodes_Fields()
+    {
+        var p = new InPacket(GameSender.QuestStartScript(questId: 2100, npcTemplateId: 9000001, x: 10, y: -20).ToArray());
+        p.ReadShort().Should().Be((short)InHeader.UserQuestRequest);
+        p.ReadByte().Should().Be(4);          // OpeningScript
+        p.ReadShort().Should().Be(2100);
+        p.ReadInt().Should().Be(9000001);
+        p.ReadShort().Should().Be(10);
+        p.ReadShort().Should().Be(-20);
+        p.Remaining.Should().Be(0);
+    }
+
+    [Fact]
+    public void QuestCompleteScript_Encodes_Fields()
+    {
+        var p = new InPacket(GameSender.QuestCompleteScript(questId: 2100, npcTemplateId: 9000001, x: 5, y: 6).ToArray());
+        p.ReadShort().Should().Be((short)InHeader.UserQuestRequest);
+        p.ReadByte().Should().Be(5);          // CompleteScript
+        p.ReadShort().Should().Be(2100);
+        p.ReadInt().Should().Be(9000001);
+        p.ReadShort().Should().Be(5);
+        p.ReadShort().Should().Be(6);
+        p.Remaining.Should().Be(0);
+    }
 }

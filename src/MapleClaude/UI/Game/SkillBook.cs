@@ -1,3 +1,4 @@
+using MapleClaude.Domain;
 using MapleClaude.Render;
 using MapleClaude.UI;
 using MapleClaude.Wz;
@@ -39,15 +40,20 @@ public sealed class SkillBook : GamePanel
     private readonly WzSprite? _row0, _row1;
     private readonly WzSprite?[] _tabOn  = new WzSprite?[5];
     private readonly WzSprite?[] _tabOff = new WzSprite?[5];
+    private readonly WzSprite?[] _tabIcon = new WzSprite?[5];   // per-tab job "book" icon overlay
     private readonly Button?   _btClose;
     private readonly Button?[] _spUp = new Button?[VisibleRows];
     private readonly List<Button> _allButtons = new();
 
     private int _activeTab;
     private int _scroll;
+    private readonly bool[] _tabEnabled = new bool[5];
+    private int[] _roots = [];
+    private int _lastTabbedJob = int.MinValue;
     private const int VisibleRows = 4;
     private const int RowTop0 = 93, RowPitch = 40, RowX = 10, RowW = 139, RowH = 34;
     private const int TabX0 = 10, TabY = 27, TabStride = 31, TabW = 30, TabH = 20;
+    private const int BookX = 15, BookY = 52;   // top-left mastery "book" icon + name header
 
     public int SP { get; set; }
     public int JobId { get; set; }
@@ -55,8 +61,29 @@ public sealed class SkillBook : GamePanel
     public Action<int>? OnSkillUp { get; set; }
     public Action<int, int>? OnSkillCast { get; set; }
 
-    private double _lastClickTime;
-    private int _lastClickRow = -1;
+    /// <summary>True while a learned skill is picked up onto the cursor for binding.</summary>
+    public bool IsDraggingSkill => _dragActive && IsVisible;
+    /// <summary>The skill id currently held for binding (0 when none).</summary>
+    public int DragSkillId => _dragActive ? _dragSkillId : 0;
+    /// <summary>The held skill's icon, for the cursor ghost (drawn by the stage on top).</summary>
+    public WzSprite? DragIcon => _dragIcon;
+    /// <summary>Drop the held skill (after a successful bind, or to cancel).</summary>
+    public void CancelSkillDrag() { _dragActive = false; _dragSkillId = 0; _dragIcon = null; _dragFromAbs = -1; }
+
+    /// <summary>Resolves a job root's "book" icon (<c>Skill.wz/{root}.img/info/icon</c>) for the top-left header.</summary>
+    public Func<int, WzCanvas?>? BookIconResolver { get; set; }
+
+    /// <summary>Resolves a job root's display name for the top-left book header.</summary>
+    public Func<int, string?>? BookNameResolver { get; set; }
+
+    // Sticky drag (mirrors the item inventory): a click picks a learned skill onto the
+    // cursor; the next click binds it to a key/quickslot (routed by GameStage) or — a
+    // quick re-click on the same row — casts it.
+    private bool _dragActive;
+    private int _dragSkillId;
+    private WzSprite? _dragIcon;
+    private int _dragFromAbs = -1;
+    private double _pickupTime;
 
     private readonly BuiltInFont? _font;
     private readonly WzTextureLoader _loader;
@@ -133,10 +160,45 @@ public sealed class SkillBook : GamePanel
         new SkillEntry { Id = 1002, Name = "Nimble Feet",  MaxLevel = 3 },
     });
 
+    // Group skills onto the 5 job-tier tabs by their root (skillId / 10000),
+    // mapped through the job's advancement chain. Tab i shows the skills under
+    // root GetSkillRoots(JobId)[i]; tabs past the player's advancement are locked.
     private void RebuildTabs()
     {
         for (var i = 0; i < 5; i++) { if (i < _tabs.Count) _tabs[i] = new(); else _tabs.Add(new()); }
-        foreach (var s in _skills) _tabs[0].Add(s);   // single tier for now; job-root tabs are a follow-up
+
+        var roots = JobConstants.GetSkillRoots(JobId);
+        _roots = roots;
+        for (var i = 0; i < 5; i++)
+        {
+            _tabEnabled[i] = i < roots.Length;
+            var canvas = _tabEnabled[i] ? BookIconResolver?.Invoke(roots[i]) : null;
+            _tabIcon[i] = canvas != null ? _loader.Load(canvas) : null;
+        }
+
+        foreach (var s in _skills)
+        {
+            var tab = Array.IndexOf(roots, s.Id / 10000);
+            if (tab >= 0 && tab < 5) _tabs[tab].Add(s);
+        }
+
+        // On a job change, jump to the highest unlocked tab (the just-reached
+        // advancement, like the original CUISkill). On same-job rebuilds (skill
+        // deltas) keep the player's current tab; only fix it if it became locked.
+        var highest = Math.Max(0, roots.Length - 1);
+        if (JobId != _lastTabbedJob)
+        {
+            _lastTabbedJob = JobId;
+            _activeTab = highest;
+            _scroll = 0;
+        }
+        else if (_activeTab >= roots.Length || !_tabEnabled[_activeTab])
+        {
+            _activeTab = highest;
+            _scroll = 0;
+        }
+
+        _scroll = Math.Clamp(_scroll, 0, Math.Max(0, ActiveTab().Count - VisibleRows));
     }
 
     private List<SkillEntry> ActiveTab() => _activeTab < _tabs.Count ? _tabs[_activeTab] : _tabs[0];
@@ -185,18 +247,29 @@ public sealed class SkillBook : GamePanel
             _font?.Draw(sb, "SKILL INVENTORY", new Vector2(px + 40, py + 5), new Color(220, 200, 150));
         }
 
-        // SP counter (top-right).
+        // SP counter (bottom of the window, like the authentic CUISkill).
         var spStr = $"SP: {SP}";
         var spW = _font?.Measure(spStr).X ?? 0f;
-        _font?.Draw(sb, spStr, new Vector2(px + PanelW - spW - 22, py + 6),
+        _font?.Draw(sb, spStr, new Vector2(px + (PanelW - spW) / 2f, py + PanelH - 21),
             SP > 0 ? new Color(90, 200, 90) : new Color(150, 150, 150));
 
-        // Job tabs.
+        // Job tabs: the active unlocked tab uses the "on" (selected) sprite; others
+        // use the "off" sprite. Locked tiers (not yet advanced to) aren't drawn.
         for (var i = 0; i < 5; i++)
         {
+            if (!_tabEnabled[i]) continue;
             var spr = i == _activeTab ? _tabOn[i] : _tabOff[i];
-            if (spr != null) spr.Draw(sb, Position);
+            spr?.Draw(sb, Position);
         }
+
+        // Mastery "book" header (top-left): the active tab's job book icon + name.
+        var book = _activeTab < _tabIcon.Length ? _tabIcon[_activeTab] : null;
+        if (book?.Texture != null)
+            sb.Draw(book.Texture, new Rectangle(px + BookX, py + BookY, Math.Min(book.Width, 32), Math.Min(book.Height, 32)), Color.White);
+        var activeRoot = _activeTab < _roots.Length ? _roots[_activeTab] : 0;
+        var bookName = BookNameResolver?.Invoke(activeRoot);
+        if (!string.IsNullOrEmpty(bookName))
+            _font?.Draw(sb, bookName, new Vector2(px + BookX + 36, py + BookY + 8), new Color(230, 220, 180));
 
         // Skill rows.
         var tab = ActiveTab();
@@ -248,27 +321,43 @@ public sealed class SkillBook : GamePanel
         foreach (var b in _allButtons) if (b?.HandleMouseButton(x, y, down) == true) return true;
         if (!down) return new Rectangle((int)Position.X, (int)Position.Y, PanelW, PanelH).Contains(x, y);
 
-        // Tab switch.
+        // Tab switch (locked tiers ignore clicks).
         for (var i = 0; i < 5; i++)
-            if (new Rectangle((int)Position.X + TabX0 + i * TabStride, (int)Position.Y + TabY, TabW, TabH).Contains(x, y))
+            if (_tabEnabled[i] && new Rectangle((int)Position.X + TabX0 + i * TabStride, (int)Position.Y + TabY, TabW, TabH).Contains(x, y))
             { _activeTab = i; _scroll = 0; return true; }
 
-        // Double-click a learned active skill → cast.
-        var tab = ActiveTab();
-        for (var i = 0; i < VisibleRows; i++)
+        // Resolve a held skill: a quick re-click on the same row casts it; anything else
+        // inside the window just puts it back. (Binds onto a key/quickslot are intercepted
+        // by GameStage before the click reaches here.)
+        if (_dragActive)
         {
-            var abs = _scroll + i;
-            if (abs >= tab.Count) break;
-            var rowRect = new Rectangle((int)Position.X + RowX, (int)Position.Y + RowTop0 + i * RowPitch, RowW, RowH);
-            if (!rowRect.Contains(x, y)) continue;
-            var now = Environment.TickCount64 / 1000.0;
-            if (_lastClickRow == abs && now - _lastClickTime < 0.4)
+            var hitAbs = RowAt(x, y);
+            var dtab = ActiveTab();
+            if (hitAbs == _dragFromAbs && hitAbs >= 0 && hitAbs < dtab.Count
+                && Environment.TickCount64 / 1000.0 - _pickupTime < 0.4)
             {
-                var sk = tab[abs];
+                var sk = dtab[hitAbs];
                 if (!sk.Passive && sk.Level > 0 && sk.Cooldown <= 0) OnSkillCast?.Invoke(sk.Id, sk.Level);
-                _lastClickRow = -1;
             }
-            else { _lastClickRow = abs; _lastClickTime = now; }
+            CancelSkillDrag();
+            return true;
+        }
+
+        // Pick a learned active skill up onto the cursor (ghost follows; drop on a key or
+        // quickslot to bind, or re-click here to cast). Passive/unlearned rows aren't grabbable.
+        var pickAbs = RowAt(x, y);
+        if (pickAbs >= 0)
+        {
+            var ptab = ActiveTab();
+            if (pickAbs < ptab.Count)
+            {
+                var sk = ptab[pickAbs];
+                if (!sk.Passive && sk.Level > 0)
+                {
+                    _dragActive = true; _dragSkillId = sk.Id; _dragIcon = sk.Icon;
+                    _dragFromAbs = pickAbs; _pickupTime = Environment.TickCount64 / 1000.0;
+                }
+            }
             return true;
         }
         return new Rectangle((int)Position.X, (int)Position.Y, PanelW, PanelH).Contains(x, y);
@@ -281,6 +370,19 @@ public sealed class SkillBook : GamePanel
         if (key == Keys.PageDown) { _scroll = Math.Min(_scroll + VisibleRows, Math.Max(0, ActiveTab().Count - VisibleRows)); return true; }
         if (key == Keys.PageUp)   { _scroll = Math.Max(0, _scroll - VisibleRows); return true; }
         return false;
+    }
+
+    // The absolute skill index under a screen point, or -1.
+    private int RowAt(int x, int y)
+    {
+        var t = ActiveTab();
+        for (var i = 0; i < VisibleRows; i++)
+        {
+            var abs = _scroll + i;
+            if (abs >= t.Count) break;
+            if (new Rectangle((int)Position.X + RowX, (int)Position.Y + RowTop0 + i * RowPitch, RowW, RowH).Contains(x, y)) return abs;
+        }
+        return -1;
     }
 
     // ── Helpers ──────────────────────────────────────────────────────────────

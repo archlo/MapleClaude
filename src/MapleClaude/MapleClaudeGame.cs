@@ -45,6 +45,7 @@ public sealed class MapleClaudeGame : Game
     private WzPackage? _questWz;
     private WzPackage? _etcWz;
     private WzPackage? _baseWz;
+    private WzPackage? _effectWz;
     private WzTextureLoader? _cursorLoader;
     private MapleCursor? _cursor;
     private UI.BuiltInFont? _font;
@@ -134,6 +135,9 @@ public sealed class MapleClaudeGame : Game
     public WzPackage? EtcWz => _etcWz;
     /// <summary>Base.wz — holds zmap.img (the global avatar layer draw order).</summary>
     public WzPackage? BaseWz => _baseWz;
+    /// <summary>Effect.wz — holds EmotionEffect.img (over-head emotion bubbles), BasicEff.img,
+    /// SkillEff.img (cast / hit effects), etc. Optional — when absent, emotion bubbles silently no-op.</summary>
+    public WzPackage? EffectWz => _effectWz;
     // Back-compat alias for stages that referenced the longer name.
     public WzPackage? CharacterWz => _charWz;
 
@@ -142,6 +146,9 @@ public sealed class MapleClaudeGame : Game
 
     /// <summary>Skill data (max level, passive, MP/cooldown/duration, icon) from Skill.wz.</summary>
     public SkillInfoService Skills { get; }
+
+    /// <summary>Quest data (info, start/complete checks, NPC→quests index) from Quest.wz.</summary>
+    public QuestInfoService Quests { get; }
 
     /// <summary>Shared registry of tunable items exposed to the debug window.</summary>
     public DebugRegistry DebugRegistry { get; }
@@ -193,6 +200,7 @@ public sealed class MapleClaudeGame : Game
         StringPool = new StringPool(loggerFactory.CreateLogger<StringPool>(), Settings.Load().Language);
         Names = new NameService(() => _stringWz, loggerFactory.CreateLogger<NameService>(), () => _questWz);
         Skills = new SkillInfoService(() => _skillWz, loggerFactory.CreateLogger<SkillInfoService>());
+        Quests = new QuestInfoService(() => _questWz, loggerFactory.CreateLogger<QuestInfoService>());
         DebugRegistry = debugRegistry;
         Session = session;
         LoginHandlers = loginHandlers;
@@ -899,6 +907,7 @@ public sealed class MapleClaudeGame : Game
         _questWz = TryOpen(Path.Combine(_wzDir, "Quest.wz"));
         _etcWz = TryOpen(Path.Combine(_wzDir, "Etc.wz"));
         _baseWz = TryOpen(Path.Combine(_wzDir, "Base.wz"));
+        _effectWz = TryOpen(Path.Combine(_wzDir, "Effect.wz"));
     }
 
     private WzPackage? TryOpen(string path)
